@@ -162,6 +162,7 @@ export const timeServerPage: Page = {
                         ${kv('Jitter',            ms(Upstream.jitterMs))}
                         ${kv('Spread',            ms(Upstream.spreadMs))}
                         ${kv('Rounds',            `${Upstream.polls}, of them ${Upstream.failedPolls} without a usable time; ${Upstream.outliers} outlier(s), ${Upstream.steps} step(s)`)}
+                        ${kv('Leap second',       html`<span id="leap-second">${upstreamLeapWords(Upstream)}</span>`)}
                         ${Upstream.lastProblem !== null ? kv('Last problem', Upstream.lastProblem) : nothing}
                     </div>
 
@@ -416,6 +417,27 @@ export function leapWords(Indicator: number): string {
         case 2:   return 'the last minute of the day has 59 seconds';
         default:  return 'unsynchronized';
     }
+
+}
+
+/**
+ * What the upstream servers announce of a leap second, and what is made of
+ * it: taken up only on the last day of a month, at whose end it is made.
+ */
+export function upstreamLeapWords(Upstream: Pick<UpstreamStatus, 'leapIndicatorAnnounced' | 'leapSecond' | 'leapSecondsMade'>): string {
+
+    const made = Upstream.leapSecondsMade !== 0
+                     ? `; ${Upstream.leapSecondsMade > 0 ? '+' : ''}${Upstream.leapSecondsMade} s made since the start`
+                     : '';
+
+    if (Upstream.leapSecond !== null)
+        return `${Upstream.leapSecond.inserted ? 'inserted' : 'deleted'} at the end of ${Upstream.leapSecond.day} (UTC): ` +
+               `announced to the clients, and made at midnight${made}`;
+
+    if (Upstream.leapIndicatorAnnounced === 1 || Upstream.leapIndicatorAnnounced === 2)
+        return `announced by the upstream servers, and passed on only on the last day of a month${made}`;
+
+    return `none announced${made}`;
 
 }
 

@@ -58,7 +58,10 @@ namespace cloud.charging.open.NTSServer
                                         Int64                FailedPolls,
                                         Int64                Outliers,
                                         Int64                Steps,
-                                        ClockDescription?    Description)
+                                        ClockDescription?    Description,
+                                        Byte?                AnnouncedLeapIndicator,
+                                        LeapSecond?          ScheduledLeap,
+                                        TimeSpan             LeapSeconds)
     {
 
         public JObject ToJSON(DateTimeOffset Now)
@@ -87,7 +90,11 @@ namespace cloud.charging.open.NTSServer
                    new JProperty("failedPolls",        FailedPolls),
                    new JProperty("outliers",           Outliers),
                    new JProperty("steps",              Steps),
-                   new JProperty("description",        Description?.ToJSON())
+                   new JProperty("description",        Description?.ToJSON()),
+                   new JProperty("leapIndicatorAnnounced",
+                                                       AnnouncedLeapIndicator),
+                   new JProperty("leapSecond",         ScheduledLeap?.ToJSON()),
+                   new JProperty("leapSecondsMade",    (Int32) Math.Round(LeapSeconds.TotalSeconds))
                );
 
         private static Double? Ms(TimeSpan? Value)
@@ -129,6 +136,18 @@ namespace cloud.charging.open.NTSServer
     /// and the clock is stepped, which is written down as a warning. Without
     /// a usable round for longer than the holdover, the time is no longer
     /// handed out as synchronized at all.
+    /// </para>
+    /// <para>
+    /// A leap second the upstream servers announce is announced to the
+    /// clients and made by the clock handed out - when more than half of the
+    /// authenticated answers of a round announce it, and only on the last day
+    /// of a month (see <see cref="LeapSecond"/>). It is made at the instant
+    /// the clock handed out reaches it, whether the servers are reachable
+    /// then or not, and announced no longer from that instant on. The
+    /// offsets are measured leap seconds aside, so that the second does not
+    /// end up in the rate of the base; where the servers did not make the
+    /// second after all, the clock is found a second off and stepped, as it
+    /// would be for any other reason.
     /// </para>
     /// </remarks>
     public sealed class UpstreamDiscipline : IAsyncDisposable
@@ -189,6 +208,9 @@ namespace cloud.charging.open.NTSServer
         private           Int64                                        failedPolls;
         private           Int64                                        outliers;
         private           Int64                                        steps;
+        private           Byte?                                        announced;
+        private           Boolean                                      heldBack;
+        private           CancellationTokenSource?                     leapWatch;
 
         #endregion
 
@@ -348,6 +370,8 @@ namespace cloud.charging.open.NTSServer
         public async Task StopAsync()
         {
 
+            StopWatching();
+
             if (cts is null)
                 return;
 
@@ -431,7 +455,12 @@ namespace cloud.charging.open.NTSServer
                 return;
             }
 
-            var offset   = verdict.Offset.Value.TotalSeconds;
+            var median   = verdict.Offset.Value.TotalSeconds;
+
+            // Leap seconds aside: after one is made, the upstream servers and
+            // the clock handed out are a second further from the base, and
+            // both the same second - the correction is what is left.
+            var offset   = median - clock.LeapSecondsAt(at).TotalSeconds;
 
             // The server the reference identifier names, and whose stratum,
             // root delay and root dispersion this server's are built on: the
@@ -447,12 +476,12 @@ namespace cloud.charging.open.NTSServer
                                    ToArray();
 
             var peer     = trusted.FirstOrDefault(result => result.ServerHostname.ToString().TrimEnd('.') == systemPeer)
-                               ?? trusted.OrderBy(result => Math.Abs(result.NTP!.Offset.TotalSeconds - offset)).
+                               ?? trusted.OrderBy(result => Math.Abs(result.NTP!.Offset.TotalSeconds - median)).
                                           First();
 
             lastGood         = at;
             lastProblem      = null;
-            lastOffset       = verdict.Offset;
+            lastOffset       = TimeSpan.FromSeconds(offset);
             systemPeer       = peer.ServerHostname.ToString().TrimEnd('.');
             upstreamStratum  = peer.NTP!.Stratum;
 
@@ -461,7 +490,7 @@ namespace cloud.charging.open.NTSServer
             if (!synchronized)
             {
 
-                var jump = clock.Step(verdict.Offset.Value, clock.Frequency);
+                var jump = clock.Step(TimeSpan.FromSeconds(offset), clock.Frequency);
 
                 Interlocked.Increment(ref steps);
 
@@ -473,6 +502,9 @@ namespace cloud.charging.open.NTSServer
                 lastError          = TimeSpan.Zero;
                 synchronized       = true;
                 synchronizedSince  = at;
+
+                Announce(trusted);
+
                 Description        = Describe(peer, verdict);
                 lastDescribed      = at;
 
@@ -516,7 +548,7 @@ namespace cloud.charging.open.NTSServer
 
                 }
 
-                var jump = clock.Step(verdict.Offset.Value, clock.Frequency);
+                var jump = clock.Step(TimeSpan.FromSeconds(offset), clock.Frequency);
 
                 Interlocked.Increment(ref steps);
 
@@ -524,6 +556,8 @@ namespace cloud.charging.open.NTSServer
                 lock (residuals) residuals.Clear();
                 samples.Add((at, offset));
                 outliersInARow = 0;
+
+                Announce(trusted);
 
                 log.Warning(String.Create(CultureInfo.InvariantCulture,
                                 $"The time handed out was stepped by {jump.TotalMilliseconds:+0.000;-0.000} ms: the upstream time servers found it further off than the step threshold " +
@@ -576,6 +610,8 @@ namespace cloud.charging.open.NTSServer
                          frequency,
                          Settings.Poll,
                          Settings.Slew);
+
+            Announce(trusted);
 
             OnMeasured?.Invoke(clock.GetUtcNow());
 
@@ -661,11 +697,12 @@ namespace cloud.charging.open.NTSServer
             if (description.IsSameFor(Description))
                 return;
 
-            // Another stratum at once, since a client chooses by it; another
-            // reference, root delay and dispersion at most every fifteen
-            // minutes - every new description is a server made anew, whose
-            // clients have to make a new key exchange.
-            var mustSay = description.Stratum != Description.Stratum;
+            // Another stratum at once, since a client chooses by it, and a leap
+            // second announced or no longer announced, since a client acts on
+            // it; another reference, root delay and dispersion at most every
+            // fifteen minutes - every new description is a server made anew.
+            var mustSay = description.Stratum       != Description.Stratum ||
+                          description.LeapIndicator != Description.LeapIndicator;
 
             if (!mustSay && lastDescribed.HasValue && At - lastDescribed.Value < TimeSpan.FromMinutes(15))
                 return;
@@ -717,8 +754,191 @@ namespace cloud.charging.open.NTSServer
                        ReferenceId:     ClockDescription.ReferenceIdOf(ntp.RemoteAddress),
                        ReferenceText:   $"{Peer.ServerHostname.ToString().TrimEnd('.')}{(ntp.RemoteAddress is not null ? $" ({ntp.RemoteAddress})" : "")}",
                        RootDelay:       rootDelay,
-                       RootDispersion:  TimeSpan.FromSeconds(rootDispersion)
+                       RootDispersion:  TimeSpan.FromSeconds(rootDispersion),
+                       LeapIndicator:   clock.ScheduledLeap?.LeapIndicator ?? 0
                    );
+
+        }
+
+        #endregion
+
+
+        #region (private) Announce(Trusted)
+
+        /// <summary>
+        /// Take up the leap second the authenticated answers of a round
+        /// announce - or let go of one they no longer announce.
+        /// </summary>
+        private void Announce(IReadOnlyList<NTSMeasurementResult> Trusted)
+        {
+
+            announced = LeapVote([.. Trusted.Select(result => result.NTP!.LeapIndicator)]);
+
+            var leap      = LeapSecond.Announced(announced.Value, clock.GetUtcNow());
+            var scheduled = clock.ScheduledLeap;
+
+            // Still announced in the second an inserted one repeats, which is
+            // still the last day of the month - and already made.
+            if (leap is not null && clock.HasMade(leap))
+                leap = null;
+
+            if (announced is 1 or 2 && leap is null && !heldBack && scheduled is null)
+            {
+                heldBack = true;
+                log.Info($"The upstream time servers announce a leap second (leap indicator {announced}), which is not passed on: only on the last day of a month, at whose end it is made.",
+                         "ntsserver", "upstream", "clock");
+            }
+
+            if (announced is 0 or 3)
+                heldBack = false;
+
+            if (leap == scheduled)
+                return;
+
+            clock.Schedule(leap);
+
+            if (leap is not null)
+            {
+
+                log.Notice($"The upstream time servers announce {leap}: it is announced to the clients from now on, and made by the time handed out at midnight.",
+                           "ntsserver", "upstream", "clock");
+
+                WatchFor(leap);
+
+            }
+
+            else
+            {
+
+                log.Warning($"The upstream time servers no longer announce {scheduled}: it is not made, and no longer announced.",
+                            "ntsserver", "upstream", "clock");
+
+                StopWatching();
+
+            }
+
+        }
+
+        #endregion
+
+        #region (private) WatchFor(Leap) / StopWatching()
+
+        /// <summary>
+        /// Wait for the clock handed out to make the given leap second, and
+        /// stop announcing it then.
+        /// </summary>
+        private void WatchFor(LeapSecond Leap)
+        {
+
+            StopWatching();
+
+            var watch = new CancellationTokenSource();
+            var token = watch.Token;
+
+            leapWatch = watch;
+
+            _ = Task.Run(async () => {
+
+                try
+                {
+
+                    while (!clock.HasMade(Leap))
+                    {
+
+                        if (clock.ScheduledLeap != Leap && !clock.HasMade(Leap))
+                            return;
+
+                        // On the timers of this machine, which the clock handed
+                        // out may run faster or slower than by a thousandth:
+                        // never past the instant, and the last second in the
+                        // smallest steps they take.
+                        var left = Leap.At - clock.GetUtcNow();
+
+                        await Task.Delay(left > TimeSpan.FromSeconds(1)
+                                             ? left - TimeSpan.FromTicks(Math.Max(left.Ticks / 500, TimeSpan.TicksPerMillisecond * 500))
+                                             : TimeSpan.FromMilliseconds(1),
+                                         token);
+
+                    }
+
+                    await LeapMade(Leap);
+
+                }
+                catch (OperationCanceledException)
+                { }
+                catch (Exception e)
+                {
+                    log.Warning($"Waiting for {Leap} failed: {e.Message}", "ntsserver", "upstream", "clock");
+                }
+
+            }, token);
+
+        }
+
+        private void StopWatching()
+        {
+
+            var watch = Interlocked.Exchange(ref leapWatch, null);
+
+            if (watch is null)
+                return;
+
+            watch.Cancel();
+            watch.Dispose();
+
+        }
+
+        #endregion
+
+        #region (private) LeapMade(Leap)
+
+        /// <summary>
+        /// The clock handed out made the given leap second: announce it no
+        /// longer, at once.
+        /// </summary>
+        /// <remarks>
+        /// Without waiting for a round that may be asking the upstream servers
+        /// for the next ten seconds: after a deleted second the next day has
+        /// begun, and a client still told to delete one would delete another at
+        /// its end. A round that describes the clock at the same time describes
+        /// it without the leap second as well, since the clock no longer has
+        /// one scheduled.
+        /// </remarks>
+        private async Task LeapMade(LeapSecond Leap)
+        {
+
+            log.Notice($"The time handed out made {Leap}: 23:59:59 was {(Leap.Inserted ? "repeated" : "skipped")}.",
+                       "ntsserver", "upstream", "clock");
+
+            if (!synchronized || Description is not ClockDescription described || described.LeapIndicator == 0)
+                return;
+
+            Description   = described with { LeapIndicator = 0 };
+            lastDescribed = clock.Base.GetUtcNow();
+
+            if (OnRedescribed is not null)
+                await OnRedescribed(Description);
+
+        }
+
+        #endregion
+
+        #region (internal static) LeapVote(LeapIndicators)
+
+        /// <summary>
+        /// The leap indicator of a round: 1 or 2 where more than half of the
+        /// authenticated answers say so, 0 otherwise - so that a single server
+        /// cannot have a leap second made, and an unsynchronized one (3) is a
+        /// voice against it.
+        /// </summary>
+        internal static Byte LeapVote(IReadOnlyList<Byte> LeapIndicators)
+        {
+
+            foreach (Byte leapIndicator in (Byte[]) [ 1, 2 ])
+                if (LeapIndicators.Count(indicator => indicator == leapIndicator) * 2 > LeapIndicators.Count)
+                    return leapIndicator;
+
+            return 0;
 
         }
 
@@ -822,7 +1042,11 @@ namespace cloud.charging.open.NTSServer
                        FailedPolls:        Interlocked.Read(ref failedPolls),
                        Outliers:           Interlocked.Read(ref outliers),
                        Steps:              Interlocked.Read(ref steps),
-                       Description:        Description
+                       Description:        Description,
+                       AnnouncedLeapIndicator:
+                                           announced,
+                       ScheduledLeap:      clock.ScheduledLeap,
+                       LeapSeconds:        clock.LeapSeconds
                    );
 
         }

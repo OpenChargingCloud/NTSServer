@@ -71,8 +71,17 @@ export interface ClockDescription {
     rootDelayMs:       number;
     /** Null where it is measured anew for every answer, as in local mode by default. */
     rootDispersionMs:  number | null;
-    /** 0 without a warning, 3 unsynchronized. */
+    /** 0 without a warning, 1 and 2 announcing a leap second inserted or deleted at midnight, 3 unsynchronized. */
     leapIndicator:     number;
+}
+
+/** A leap second at the end of a UTC month, scheduled to be made by the clock handed out. */
+export interface LeapSecond {
+    /** The last day of the month, at whose end it is made: "2026-12-31". */
+    day:            string;
+    /** Inserted - the last minute has 61 seconds - or deleted - it has 59. */
+    inserted:       boolean;
+    leapIndicator:  number;
 }
 
 /** How the upstream servers were asked, and what was made of their answers. */
@@ -104,6 +113,12 @@ export interface UpstreamStatus {
     outliers:              number;
     steps:                 number;
     description:           ClockDescription | null;
+    /** What more than half of the answers of the last usable round announced: 0 where they did not agree on 1 or 2. */
+    leapIndicatorAnnounced: number | null;
+    /** The leap second taken up from them, until it is made: only on the last day of a month. */
+    leapSecond:            LeapSecond | null;
+    /** The leap seconds made since the start, added up: -1 after an inserted one. */
+    leapSecondsMade:       number;
 }
 
 /** The certificate NTS-KE over TLS shows. */
@@ -134,6 +149,10 @@ export interface TimeServerStatus {
     ssh:           { enabled: boolean; served: boolean; subsystem: string; url: string | null; hostKey: string | null;
                      clients: { name: string; enabled: boolean; keys: number }[] };
     clock:         { now: string; base: 'free-running' | 'system'; correctionMs: number; frequencyPPM: number;
+                     /** The leap seconds made since the start, added up. */
+                     leapSeconds: number;
+                     /** The leap second scheduled and not yet made. */
+                     leapSecond: LeapSecond | null;
                      description: ClockDescription | null };
     upstream:      UpstreamStatus | null;
     /** What it answered since the program started, over every server made since. */

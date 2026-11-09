@@ -154,7 +154,12 @@ namespace cloud.charging.open.NTSServer
 
             => $"stratum {Stratum}, reference {ReferenceText}, " +
                $"root delay {RootDelay.TotalMilliseconds.ToString("F3", CultureInfo.InvariantCulture)} ms, " +
-               $"root dispersion {(RootDispersion.HasValue ? RootDispersion.Value.TotalMilliseconds.ToString("F3", CultureInfo.InvariantCulture) + " ms" : "as measured")}";
+               $"root dispersion {(RootDispersion.HasValue ? RootDispersion.Value.TotalMilliseconds.ToString("F3", CultureInfo.InvariantCulture) + " ms" : "as measured")}" +
+               LeapIndicator switch {
+                   1 => ", announcing a leap second inserted at midnight",
+                   2 => ", announcing a leap second deleted at midnight",
+                   _ => ""
+               };
 
         #endregion
 

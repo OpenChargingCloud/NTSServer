@@ -78,7 +78,17 @@ namespace cloud.charging.open.NTSServer
     /// of ntpd and of the kernels - so that time handed out never runs
     /// backwards and never jumps. Only a <see cref="Step"/> jumps, which the
     /// discipline does before anything has been handed out, and afterwards
-    /// only for a difference too large to slew away in reasonable time.
+    /// only for a difference too large to slew away in reasonable time - and
+    /// a leap second, which is a jump by definition.
+    /// </para>
+    /// <para>
+    /// Leap seconds are kept apart from the correction: a
+    /// <see cref="LeapSecond"/> scheduled is made at the exact instant the
+    /// clock handed out reaches it, as a jump of a second, and stays in the
+    /// time handed out from then on - while the correction, which is what
+    /// measuring found, goes on without a jump. So the rate measured across a
+    /// leap second is the rate of the oscillator, and not a second spread over
+    /// the last sixteen measurements.
     /// </para>
     /// <para>
     /// The node itself runs on this clock too: its log, its certificates, and
@@ -94,13 +104,21 @@ namespace cloud.charging.open.NTSServer
         /// <summary>
         /// One stretch of the correction: from <paramref name="Anchor"/> on it
         /// grows at <paramref name="Rate"/> until <paramref name="SlewEnd"/>,
-        /// and at <paramref name="Frequency"/> after it.
+        /// and at <paramref name="Frequency"/> after it - and the leap seconds,
+        /// each made from the time of the base given with it on.
         /// </summary>
         private sealed record Segment(DateTimeOffset  Anchor,
                                       Double          Correction,
                                       Double          Rate,
                                       DateTimeOffset  SlewEnd,
-                                      Double          Frequency);
+                                      Double          Frequency,
+                                      LeapAt[]        Leaps);
+
+        /// <summary>
+        /// A leap second, and the time of the base at which it is made.
+        /// </summary>
+        private sealed record LeapAt(LeapSecond      Leap,
+                                     DateTimeOffset  BaseTime);
 
         #endregion
 
@@ -128,10 +146,38 @@ namespace cloud.charging.open.NTSServer
             => baseClock is FreeRunningClock;
 
         /// <summary>
-        /// The correction now: what is handed out minus what the base says.
+        /// The correction now: what is handed out minus what the base says,
+        /// leap seconds aside.
         /// </summary>
         public TimeSpan      Correction
             => ToTimeSpan(CorrectionAt(segment, baseClock.GetUtcNow()));
+
+        /// <summary>
+        /// The leap seconds made so far, added up: what is handed out minus
+        /// what the base says on top of the correction - minus a second after
+        /// an inserted one.
+        /// </summary>
+        public TimeSpan      LeapSeconds
+            => LeapSecondsAt(baseClock.GetUtcNow());
+
+        /// <summary>
+        /// The leap second scheduled and not yet made, or null.
+        /// </summary>
+        public LeapSecond?   ScheduledLeap
+        {
+            get
+            {
+
+                var now = baseClock.GetUtcNow();
+
+                foreach (var leap in segment.Leaps)
+                    if (leap.BaseTime > now)
+                        return leap.Leap;
+
+                return null;
+
+            }
+        }
 
         /// <summary>
         /// The rate the correction grows at once a slew is over, in seconds
@@ -172,7 +218,7 @@ namespace cloud.charging.open.NTSServer
             this.baseClock  = Base ?? System;
 
             var now         = baseClock.GetUtcNow();
-            this.segment    = new Segment(now, 0, 0, now, 0);
+            this.segment    = new Segment(now, 0, 0, now, 0, []);
 
         }
 
@@ -184,9 +230,10 @@ namespace cloud.charging.open.NTSServer
         public override DateTimeOffset GetUtcNow()
         {
 
-            var now = baseClock.GetUtcNow();
+            var now      = baseClock.GetUtcNow();
+            var current  = segment;
 
-            return now + ToTimeSpan(CorrectionAt(segment, now));
+            return now + ToTimeSpan(CorrectionAt(current, now) + LeapSecondsAt(current, now));
 
         }
 
@@ -231,7 +278,7 @@ namespace cloud.charging.open.NTSServer
                 var now         = freeRunning.GetUtcNow();
 
                 baseClock  = freeRunning;
-                segment    = new Segment(now, 0, 0, now, 0);
+                segment    = new Segment(now, 0, 0, now, 0, []);
 
             }
         }
@@ -241,11 +288,71 @@ namespace cloud.charging.open.NTSServer
         #region CorrectionAt(BaseTime)
 
         /// <summary>
-        /// The correction at the given time of the base clock.
+        /// The correction at the given time of the base clock, leap seconds aside.
         /// </summary>
         public TimeSpan CorrectionAt(DateTimeOffset BaseTime)
 
             => ToTimeSpan(CorrectionAt(segment, BaseTime));
+
+        #endregion
+
+        #region LeapSecondsAt(BaseTime)
+
+        /// <summary>
+        /// The leap seconds made by the given time of the base, added up.
+        /// </summary>
+        public TimeSpan LeapSecondsAt(DateTimeOffset BaseTime)
+
+            => ToTimeSpan(LeapSecondsAt(segment, BaseTime));
+
+        #endregion
+
+        #region HasMade(Leap)
+
+        /// <summary>
+        /// Whether the given leap second has been made.
+        /// </summary>
+        public Boolean HasMade(LeapSecond Leap)
+        {
+
+            var now = baseClock.GetUtcNow();
+
+            foreach (var leap in segment.Leaps)
+                if (leap.Leap == Leap && leap.BaseTime <= now)
+                    return true;
+
+            return false;
+
+        }
+
+        #endregion
+
+        #region Schedule(Leap)
+
+        /// <summary>
+        /// Make the given leap second when the clock handed out reaches it - or,
+        /// with null, make none that is scheduled and not yet made.
+        /// </summary>
+        /// <remarks>
+        /// One at a time: a leap second scheduled replaces one scheduled before
+        /// that was not yet made. One already made is not made again.
+        /// </remarks>
+        /// <param name="Leap">The leap second, or null.</param>
+        public void Schedule(LeapSecond? Leap)
+        {
+            lock (gate)
+            {
+
+                var now  = baseClock.GetUtcNow();
+                var made = segment.Leaps.Where(leap => leap.BaseTime <= now).ToArray();
+
+                if (Leap is not null && !made.Any(leap => leap.Leap == Leap))
+                    made = [ .. made, new LeapAt(Leap, BaseTimeOf(segment, made, Leap, now)) ];
+
+                segment = segment with { Leaps = made };
+
+            }
+        }
 
         #endregion
 
@@ -267,7 +374,7 @@ namespace cloud.charging.open.NTSServer
                 var now      = baseClock.GetUtcNow();
                 var before   = CorrectionAt(segment, now);
 
-                segment      = new Segment(now, Correction.TotalSeconds, Frequency, now, Frequency);
+                segment      = Rescheduled(new Segment(now, Correction.TotalSeconds, Frequency, now, Frequency, segment.Leaps), now);
 
                 return ToTimeSpan(Correction.TotalSeconds - before);
 
@@ -307,11 +414,13 @@ namespace cloud.charging.open.NTSServer
                                     ? error / duration
                                     : 0;
 
-                segment       = new Segment(now,
-                                            current,
-                                            Frequency + slewRate,
-                                            now + TimeSpan.FromSeconds(duration),
-                                            Frequency);
+                segment       = Rescheduled(new Segment(now,
+                                                        current,
+                                                        Frequency + slewRate,
+                                                        now + TimeSpan.FromSeconds(duration),
+                                                        Frequency,
+                                                        segment.Leaps),
+                                            now);
 
                 return TimeSpan.FromSeconds(duration);
 
@@ -340,6 +449,87 @@ namespace cloud.charging.open.NTSServer
             return elapsed <= slewing
                        ? Segment.Correction + Segment.Rate * elapsed
                        : Segment.Correction + Segment.Rate * slewing + Segment.Frequency * (elapsed - slewing);
+
+        }
+
+        #endregion
+
+        #region (private static) LeapSecondsAt(Segment, BaseTime)
+
+        private static Double LeapSecondsAt(Segment         Segment,
+                                            DateTimeOffset  BaseTime)
+        {
+
+            var seconds = 0.0;
+
+            foreach (var leap in Segment.Leaps)
+                if (BaseTime >= leap.BaseTime)
+                    seconds += leap.Leap.Jump.TotalSeconds;
+
+            return seconds;
+
+        }
+
+        #endregion
+
+        #region (private static) Rescheduled(Segment, Now)
+
+        /// <summary>
+        /// The segment with the leap second not yet made moved to where the
+        /// new correction reaches it: a step or a slew moves the instant the
+        /// clock handed out reaches midnight, and the leap second is made at
+        /// that instant and no other.
+        /// </summary>
+        private static Segment Rescheduled(Segment         Segment,
+                                           DateTimeOffset  Now)
+        {
+
+            if (Segment.Leaps.Length == 0)
+                return Segment;
+
+            var made     = Segment.Leaps.Where(leap => leap.BaseTime <= Now).ToArray();
+            var pending  = Segment.Leaps.Where(leap => leap.BaseTime >  Now).
+                                         Select(leap => new LeapAt(leap.Leap, BaseTimeOf(Segment, made, leap.Leap, Now)));
+
+            return Segment with { Leaps = [ .. made, .. pending ] };
+
+        }
+
+        #endregion
+
+        #region (private static) BaseTimeOf(Segment, Made, Leap, Now)
+
+        /// <summary>
+        /// The time of the base at which the clock handed out reaches the
+        /// instant of the given leap second - with the given correction and
+        /// the leap seconds made before - but not before now.
+        /// </summary>
+        /// <remarks>
+        /// The correction is a straight line until the slew ends and another
+        /// after it, so the instant is where the first one reaches it, or else
+        /// where the second does.
+        /// </remarks>
+        private static DateTimeOffset BaseTimeOf(Segment         Segment,
+                                                 LeapAt[]        Made,
+                                                 LeapSecond      Leap,
+                                                 DateTimeOffset  Now)
+        {
+
+            var leaped   = Made.Sum(leap => leap.Leap.Jump.TotalSeconds);
+
+            // Seconds after the anchor: x + Correction + Rate * x = target, then
+            // x + Correction + Rate * slewing + Frequency * (x - slewing) = target.
+            var target   = (Leap.At - Segment.Anchor).TotalSeconds - leaped - Segment.Correction;
+            var slewing  = Math.Max(0, (Segment.SlewEnd - Segment.Anchor).TotalSeconds);
+
+            var x        = target / (1 + Segment.Rate);
+
+            if (x > slewing)
+                x = (target - (Segment.Rate - Segment.Frequency) * slewing) / (1 + Segment.Frequency);
+
+            var at       = Segment.Anchor.AddTicks((Int64) Math.Ceiling(x * TimeSpan.TicksPerSecond));
+
+            return at > Now ? at : Now;
 
         }
 

@@ -10,7 +10,7 @@ import { asked, open, refused, until, type Asked } from '../../test/ntsServer.ts
 import { strict as assert }  from 'node:assert';
 import { describe, it }      from 'node:test';
 
-const { timeServerPage, leapWords, pemFileName } = await import('./timeServer.ts');
+const { timeServerPage, leapWords, upstreamLeapWords, pemFileName } = await import('./timeServer.ts');
 
 
 const pem = '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n';
@@ -29,6 +29,7 @@ function status(Upstream: boolean, Synchronized = true): Record<string, unknown>
         ssh:           { enabled: true, served: true, subsystem: 'ntske/1@open.charging.cloud', url: 'ssh://192.168.1.2:22361',
                          hostKey: 'SHA256:host', clients: [ { name: 'cs001', enabled: true, keys: 1 }, { name: 'cs002', enabled: false, keys: 1 } ] },
         clock:         { now: '2026-11-09T12:30:00Z', base: Upstream ? 'free-running' : 'system', correctionMs: 121.9, frequencyPPM: 3.25,
+                         leapSeconds: 0, leapSecond: null,
                          description: { stratum: Upstream ? 2 : 1, referenceId: Upstream ? '192.53.103.108' : 'LOCL',
                                         rootDelayMs: 4.2, rootDispersionMs: 5.838, leapIndicator: 0 } },
         upstream:      Upstream
@@ -36,7 +37,8 @@ function status(Upstream: boolean, Synchronized = true): Record<string, unknown>
                                lastPoll: '2026-11-09T12:29:00Z', lastGood: '2026-11-09T12:29:00Z', lastGoodAgeSeconds: 60, lastProblem: null,
                                offsetMs: -4.4, errorMs: 0.2, jitterMs: 1.1, spreadMs: 7.1, systemPeer: 'ptbtime1.ptb.de', upstreamStratum: 1,
                                answered: 4, asked: 4, frequencyPPM: 3.25, correctionMs: 121.9, slewRemainingSeconds: 12, polls: 30,
-                               failedPolls: 0, outliers: 1, steps: 1, description: null }
+                               failedPolls: 0, outliers: 1, steps: 1, description: null,
+                               leapIndicatorAnnounced: 0, leapSecond: null, leapSecondsMade: 0 }
                            : null,
         metrics:       { ntpRequestsReceived: 12, ntpResponsesSent: 11, ntsKEResponsesSent: 3 }
     };
@@ -95,6 +97,7 @@ describe('the time server', () => {
         assert.match(root.querySelector('#synchronized')!.textContent!, /synchronized/);
         assert.match(root.querySelector('#upstream')!.textContent!, /ptbtime1\.ptb\.de, stratum 1/);
         assert.match(root.querySelector('#upstream')!.textContent!, /4 of 4/);
+        assert.equal(root.querySelector('#leap-second')!.textContent, 'none announced');
         assert.match(root.querySelector('#time-handed-out')!.textContent!, /Correction\s+121[.,]900 ms/);
 
         const button = root.querySelector<HTMLButtonElement>('#ask-now')!;
@@ -152,6 +155,20 @@ describe('the words of the time server page', () => {
         assert.match(leapWords(1), /61 seconds/);
         assert.match(leapWords(2), /59 seconds/);
         assert.equal(leapWords(3), 'unsynchronized');
+    });
+
+    it('says what is made of a leap second the upstream servers announce', () => {
+
+        assert.equal(upstreamLeapWords({ leapIndicatorAnnounced: 0, leapSecond: null, leapSecondsMade: 0 }), 'none announced');
+
+        assert.equal(upstreamLeapWords({ leapIndicatorAnnounced: 1, leapSecond: { day: '2026-12-31', inserted: true, leapIndicator: 1 }, leapSecondsMade: 0 }),
+                     'inserted at the end of 2026-12-31 (UTC): announced to the clients, and made at midnight');
+
+        // Announced on another day than the last of the month: held back.
+        assert.match(upstreamLeapWords({ leapIndicatorAnnounced: 1, leapSecond: null, leapSecondsMade: 0 }), /only on the last day of a month/);
+
+        assert.equal(upstreamLeapWords({ leapIndicatorAnnounced: 0, leapSecond: null, leapSecondsMade: -1 }), 'none announced; -1 s made since the start');
+
     });
 
     it('names the certificate after the first name it is made out to, as a file may be named', () => {

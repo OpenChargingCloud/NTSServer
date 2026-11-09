@@ -93,7 +93,8 @@ namespace cloud.charging.open.NTSServer.Tests
         /// </summary>
         private async Task<NTSServerNode> Started(JObject?  Section        = null,
                                                   JObject?  Configuration  = null,
-                                                  Action<NTSServerNode>? BeforeStart = null)
+                                                  Action<NTSServerNode>? BeforeStart = null,
+                                                  ServedClock? Clock       = null)
         {
 
             var directory = Path.Combine(Path.GetTempPath(), "NTSServerTests-" + Guid.NewGuid().ToString("N")[..12]);
@@ -123,7 +124,8 @@ namespace cloud.charging.open.NTSServer.Tests
                            CertificatesPath:  Path.Combine(directory, "certificates"),
                            LogToConsole:      false,
                            BridgeDebugLog:    false,
-                           SSH:               new SSHSettings(Enabled: true, Port: IPPort.Parse(TestPorts.Free()))
+                           SSH:               new SSHSettings(Enabled: true, Port: IPPort.Parse(TestPorts.Free())),
+                           Clock:             Clock
                        );
 
             nodes.Add(node);
@@ -765,48 +767,7 @@ namespace cloud.charging.open.NTSServer.Tests
         {
 
             var upstream   = await Started(new JObject(new JProperty("local", new JObject(new JProperty("stratum", 1), new JProperty("referenceId", "GPS")))));
-
-            var groups     = new JObject(
-                                 new JProperty("nts", new JObject(
-                                     new JProperty("groups", new JObject(
-                                         new JProperty("legal", new JObject(
-                                             new JProperty("servers", new JArray(
-                                                 new JObject(
-                                                     new JProperty("hostname",   "localhost"),
-                                                     new JProperty("ntsKEPort",  upstream.Settings.NTSKEPort.ToUInt16()),
-                                                     new JProperty("ntpPort",    upstream.Settings.NTPPort.  ToUInt16())
-                                                 )
-                                             )),
-                                             new JProperty("minServers", 1)
-                                         ))
-                                     ))
-                                 ))
-                             );
-
-            var pem        = File.ReadAllText(Path.Combine(Path.GetDirectoryName(upstream.ConfigFile.Path)!, NTSServerNode.DefaultDirectory, NTSKETLSIdentity.SelfSignedFileName));
-            var certOnly   = pem[..(pem.IndexOf("-----END CERTIFICATE-----", StringComparison.Ordinal) + "-----END CERTIFICATE-----".Length)];
-
-            var downstream = await Started(
-                                 new JObject(
-                                     new JProperty("timeSource",  "upstream"),
-                                     new JProperty("upstream",    new JObject(new JProperty("pollSeconds", 16)))
-                                 ),
-                                 groups,
-                                 BeforeStart: node => {
-
-                                     // The upstream server's self-signed certificate, as a
-                                     // root for "nts" - the one thing that makes it believed.
-                                     Assert.That(node.Certificates.Import(System.Text.Encoding.ASCII.GetBytes(certOnly),
-                                                                          CertificateKind.TLSRoot,
-                                                                          null,
-                                                                          "upstream",
-                                                                          [ CertificateUsages.NTS ],
-                                                                          out _,
-                                                                          out var importError),
-                                                 Is.True, importError);
-
-                                 }
-                             );
+            var downstream = await StartedFollowing(upstream);
 
             Assert.That(downstream.Clock.IsFreeRunning, Is.True);
 
@@ -837,6 +798,165 @@ namespace cloud.charging.open.NTSServer.Tests
             Assert.That(query.Success,                Is.True, query.ErrorMessage);
             Assert.That(query.Response!.Stratum,      Is.EqualTo(2));
             Assert.That(query.Response.ClockOffset!.Value.Duration(), Is.LessThan(TimeSpan.FromMilliseconds(250)));
+
+        }
+
+        #endregion
+
+        #region UpstreamMode_PassesOnALeapSecondAndMakesItAtMidnight()
+
+        /// <summary>
+        /// The system's clock, moved by as much as it is told.
+        /// </summary>
+        private sealed class ShiftedClock(TimeSpan Shift) : TimeProvider
+        {
+
+            public TimeSpan Shift { get; set; } = Shift;
+
+            public override DateTimeOffset GetUtcNow()
+                => System.GetUtcNow() + Shift;
+
+        }
+
+        /// <summary>
+        /// An upstream server announcing an inserted leap second on the last day
+        /// of a month: followed, the announcement is passed on to the clients,
+        /// the second made at midnight - 23:59:59 repeated - and announced no
+        /// longer from then on.
+        /// </summary>
+        /// <remarks>
+        /// Both servers live ten minutes before the end of last month from their
+        /// start, so that their certificates and the master keys of their
+        /// cookies are made there and valid there; the upstream server is then
+        /// moved on to five seconds before midnight, and followed there.
+        /// </remarks>
+        [Test]
+        public async Task UpstreamMode_PassesOnALeapSecondAndMakesItAtMidnight()
+        {
+
+            var now        = DateTimeOffset.UtcNow;
+            var midnight   = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, TimeSpan.Zero);
+            var leap       = new LeapSecond(midnight, Inserted: true);
+            var shifted    = new ShiftedClock(midnight - TimeSpan.FromMinutes(10) - now);
+
+            var upstream   = await Started(new JObject(new JProperty("local", new JObject(new JProperty("stratum", 1), new JProperty("referenceId", "GPS")))),
+                                           Clock: new ServedClock(shifted));
+
+            var downstream = await StartedFollowing(upstream, new ServedClock(shifted));
+
+            for (var i = 0; i < 60 && !downstream.Host.IsServing; i++)
+                await Task.Delay(500);
+
+            Assert.That(downstream.Host.IsServing, Is.True, $"not synchronized: {downstream.Upstream!.Status().LastProblem}");
+
+            // The upstream server announces it - as the kernel of a server would - and
+            // is five seconds before midnight now, which the server following it finds
+            // further off than the step threshold, and is stepped to on the third round.
+            await upstream.Host.StartAsync(upstream.Host.Description! with { LeapIndicator = 1 });
+
+            shifted.Shift += midnight - TimeSpan.FromSeconds(5) - shifted.GetUtcNow();
+
+            UpstreamStatus status = null!;
+
+            for (var round = 0; round < UpstreamDiscipline.StepoutRounds; round++)
+                status = await downstream.Upstream!.PollAsync();
+
+            Assert.That(status.AnnouncedLeapIndicator,              Is.EqualTo(1));
+            Assert.That(status.ScheduledLeap,                       Is.EqualTo(leap));
+            Assert.That(downstream.Host.Description!.LeapIndicator, Is.EqualTo(1));
+
+            var client      = ClientOf(downstream);
+            var keyExchange = await client.GetNTSKERecords();
+
+            Assert.That(keyExchange.Success, Is.True, keyExchange.ErrorMessage?.ToString());
+
+            var before      = await client.QueryTime(NTSKEResponse: keyExchange.Response,
+                                                     Timeout:       TimeSpan.FromSeconds(10));
+
+            Assert.That(before.Success,       Is.True, before.ErrorMessage);
+            Assert.That(before.Response!.LI,  Is.EqualTo(1));
+
+            // Made at midnight, and announced no longer.
+            for (var i = 0; i < 150 && !(downstream.Clock.HasMade(leap) && downstream.Host.Description!.LeapIndicator == 0); i++)
+                await Task.Delay(100);
+
+            Assert.That(downstream.Clock.HasMade(leap),               Is.True);
+            Assert.That(downstream.Clock.LeapSeconds,                 Is.EqualTo(TimeSpan.FromSeconds(-1)));
+            Assert.That(downstream.Clock.ScheduledLeap,               Is.Null);
+            Assert.That(downstream.Host.Description!.LeapIndicator,  Is.EqualTo(0));
+
+            // The upstream server here made none - local mode leaves leap seconds to the
+            // machine's clock - so the time handed out is a second behind it now.
+            Assert.That((upstream.Clock.GetUtcNow() - downstream.Clock.GetUtcNow()).TotalSeconds, Is.EqualTo(1).Within(0.1));
+
+            keyExchange     = await client.GetNTSKERecords();
+
+            var after       = await client.QueryTime(NTSKEResponse: keyExchange.Response,
+                                                     Timeout:       TimeSpan.FromSeconds(10));
+
+            Assert.That(after.Success,        Is.True, after.ErrorMessage);
+            Assert.That(after.Response!.LI,   Is.EqualTo(0));
+
+        }
+
+        #endregion
+
+        #region (private) StartedFollowing(Upstream, Clock = null)
+
+        /// <summary>
+        /// An NTS server in upstream mode following the given one - asked over
+        /// NTS-KE (TLS 1.3), its self-signed identity held to as a root of the
+        /// node's own store for "nts", as a local network without a PKI would
+        /// hold it - every 16 seconds.
+        /// </summary>
+        private async Task<NTSServerNode> StartedFollowing(NTSServerNode  Upstream,
+                                                           ServedClock?   Clock = null)
+        {
+
+            var groups     = new JObject(
+                                 new JProperty("nts", new JObject(
+                                     new JProperty("groups", new JObject(
+                                         new JProperty("legal", new JObject(
+                                             new JProperty("servers", new JArray(
+                                                 new JObject(
+                                                     new JProperty("hostname",   "localhost"),
+                                                     new JProperty("ntsKEPort",  Upstream.Settings.NTSKEPort.ToUInt16()),
+                                                     new JProperty("ntpPort",    Upstream.Settings.NTPPort.  ToUInt16())
+                                                 )
+                                             )),
+                                             new JProperty("minServers", 1)
+                                         ))
+                                     ))
+                                 ))
+                             );
+
+            var pem        = File.ReadAllText(Path.Combine(Path.GetDirectoryName(Upstream.ConfigFile.Path)!, NTSServerNode.DefaultDirectory, NTSKETLSIdentity.SelfSignedFileName));
+            var certOnly   = pem[..(pem.IndexOf("-----END CERTIFICATE-----", StringComparison.Ordinal) + "-----END CERTIFICATE-----".Length)];
+
+            var downstream = await Started(
+                                 new JObject(
+                                     new JProperty("timeSource",  "upstream"),
+                                     new JProperty("upstream",    new JObject(new JProperty("pollSeconds", 16)))
+                                 ),
+                                 groups,
+                                 BeforeStart: node => {
+
+                                     // The upstream server's self-signed certificate, as a
+                                     // root for "nts" - the one thing that makes it believed.
+                                     Assert.That(node.Certificates.Import(System.Text.Encoding.ASCII.GetBytes(certOnly),
+                                                                          CertificateKind.TLSRoot,
+                                                                          null,
+                                                                          "upstream",
+                                                                          [ CertificateUsages.NTS ],
+                                                                          out _,
+                                                                          out var importError),
+                                                 Is.True, importError);
+
+                                 },
+                                 Clock: Clock
+                             );
+
+            return downstream;
 
         }
 

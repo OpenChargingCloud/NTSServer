@@ -724,6 +724,8 @@ namespace cloud.charging.open.NTSServer
                            new JProperty("base",          Clock.IsFreeRunning ? "free-running" : "system"),
                            new JProperty("correctionMs",  Math.Round(Clock.Correction.TotalMilliseconds, 3)),
                            new JProperty("frequencyPPM",  Math.Round(Clock.Frequency * 1e6, 3)),
+                           new JProperty("leapSeconds",   (Int32) Math.Round(Clock.LeapSeconds.TotalSeconds)),
+                           new JProperty("leapSecond",    Clock.ScheduledLeap?.ToJSON()),
                            new JProperty("description",   Host.Description?.ToJSON())
                        )),
                        new JProperty("upstream",      upstream?.ToJSON(Clock.Base.GetUtcNow())),
