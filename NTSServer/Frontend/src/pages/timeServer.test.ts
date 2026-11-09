@@ -2,10 +2,12 @@
  * The time server page drawn, in a document of happy-dom, against a stand-in
  * NTS server: in local mode what it hands out and its certificate; in
  * upstream mode the last round, and "Ask them now" for whoever may run the
- * time servers - and greyed out, with why, for whoever may not.
+ * time servers - and greyed out, with why, for whoever may not. The master
+ * keys of the cookies, a new one that keeps the others and one that forgets
+ * them, asked first; and the key exchanges over SSH since the start.
  */
 
-import { asked, open, refused, until, type Asked } from '../../test/ntsServer.ts';
+import { asked, open, refused, said, until, type Asked } from '../../test/ntsServer.ts';
 
 import { strict as assert }  from 'node:assert';
 import { describe, it }      from 'node:test';
@@ -14,6 +16,23 @@ const { timeServerPage, leapWords, upstreamLeapWords, pemFileName } = await impo
 
 
 const pem = '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n';
+
+const none = { served: 0, refused: 0, cookies: 0, lastServed: null, lastRefused: null };
+
+const cs001 = { served: 3, refused: 1, cookies: 24,
+                lastServed:  { at: '2026-11-09T12:20:00Z', from: '192.168.1.17:50022', method: 'exporter', aeadAlgorithm: 15, cookies: 8 },
+                lastRefused: { at: '2026-11-09T11:00:00Z', from: '192.168.1.17:50010', why: 'the client is switched off' } };
+
+const alice = { served: 2, refused: 0, cookies: 16,
+                lastServed:  { at: '2026-11-09T12:25:00Z', from: '127.0.0.1:50100', method: 'transport', aeadAlgorithm: 15, cookies: 8 },
+                lastRefused: null };
+
+interface Key { id: number; notBefore: string; notAfter: string; current: boolean }
+
+const firstKeys: Key[] = [ { id: 1, notBefore: '2026-11-08T12:00:00Z', notAfter: '2026-11-09T12:00:00Z', current: false },
+                           { id: 2, notBefore: '2026-11-09T12:00:00Z', notAfter: '2026-11-10T12:00:00Z', current: true  } ];
+
+let masterKeys: Key[] = firstKeys;
 
 function status(Upstream: boolean, Synchronized = true): Record<string, unknown> {
 
@@ -27,7 +46,10 @@ function status(Upstream: boolean, Synchronized = true): Record<string, unknown>
                                             notAfter: '2029-11-09T12:00:00Z', source: 'made here', selfSigned: true, pem } },
         ntp:           { port: 123, advertised: null },
         ssh:           { enabled: true, served: true, subsystem: 'ntske/1@open.charging.cloud', url: 'ssh://192.168.1.2:22361',
-                         hostKey: 'SHA256:host', clients: [ { name: 'cs001', enabled: true, keys: 1 }, { name: 'cs002', enabled: false, keys: 1 } ] },
+                         hostKey: 'SHA256:host', clients: [ { name: 'cs001', enabled: true,  keys: 1, activity: cs001 },
+                                                            { name: 'cs002', enabled: false, keys: 1, activity: none  } ],
+                         accounts: [ { name: 'alice', activity: alice } ] },
+        masterKeys,
         clock:         { now: '2026-11-09T12:30:00Z', base: Upstream ? 'free-running' : 'system', correctionMs: 121.9, frequencyPPM: 3.25,
                          leapSeconds: 0, leapSecond: null,
                          description: { stratum: Upstream ? 2 : 1, referenceId: Upstream ? '192.53.103.108' : 'LOCL',
@@ -48,7 +70,7 @@ function status(Upstream: boolean, Synchronized = true): Record<string, unknown>
 let upstream     = false;
 let roundsAsked  = 0;
 
-function ntsServer({ method, path }: Asked): unknown {
+function ntsServer({ method, path, body }: Asked): unknown {
 
     if (method === 'GET'  && path === '/ntsServer')
         return status(upstream);
@@ -58,8 +80,24 @@ function ntsServer({ method, path }: Asked): unknown {
         return (status(true).upstream as Record<string, unknown>);
     }
 
+    if (method === 'POST' && path === '/ntsServer/masterKeys/rotate') {
+
+        const forget  = (body as { forget: boolean }).forget;
+        const id      = Math.max(...masterKeys.map(key => key.id)) + 1;
+        const rotated = { id, notBefore: '2026-11-09T12:30:00Z', notAfter: '2026-11-10T12:30:00Z', current: true };
+
+        masterKeys = [ ...(forget ? [] : masterKeys.map(key => ({ ...key, current: false }))), rotated ];
+
+        return { rotated, forgotten: forget, masterKeys };
+
+    }
+
     return undefined;
 
+}
+
+function rotations(): unknown[] {
+    return asked.filter(one => one.method === 'POST' && one.path === '/ntsServer/masterKeys/rotate').map(one => one.body);
 }
 
 
@@ -142,6 +180,114 @@ describe('the time server', () => {
                                 () => refused(403, 'not yours to read'), root => root.querySelector('.error-box') !== null);
 
         assert.match(root.querySelector('.error-box')!.textContent!, /The time server could not be loaded: .*not yours to read/);
+
+    });
+
+    it('says how many key exchanges over SSH were served and turned away, by clients and accounts', async () => {
+
+        upstream = false;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read' ],
+                                ntsServer, root => root.querySelector('#ssh-exchanges') !== null);
+
+        assert.match(root.querySelector('#ssh-exchanges')!.textContent!, /^5 served and 1 turned away since the start, the last served \d+[smhd] ago$/);
+
+    });
+
+});
+
+
+describe('the master keys of the cookies', () => {
+
+    it('shows them - ids and validity, which one seals now - and makes a new one that keeps the others', async () => {
+
+        upstream   = false;
+        masterKeys = firstKeys;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read', 'timeserver:edit' ],
+                                ntsServer, root => root.querySelector('#master-keys') !== null);
+
+        assert.equal(root.querySelectorAll('tr[data-master-key]').length, 2);
+        assert.match(root.querySelector('tr[data-master-key="2"]')!.textContent!, /seals now/);
+        assert.match(root.querySelector('tr[data-master-key="1"]')!.textContent!, /opens its cookies/);
+
+        root.querySelector<HTMLButtonElement>('#rotate')!.click();
+
+        await until(() => /new master key 3 from now on; the earlier keys still open their cookies/.test(root.querySelector('#rotate-note')!.textContent!),
+                    'the new key was not said');
+
+        assert.deepEqual(rotations(), [ { forget: false } ]);
+        assert.equal(said.length, 0, 'asked before a rotation that forgets nothing');
+        assert.equal(root.querySelectorAll('tr[data-master-key]').length, 3);
+        assert.match(root.querySelector('tr[data-master-key="3"]')!.textContent!, /seals now/);
+        assert.match(root.querySelector('tr[data-master-key="2"]')!.textContent!, /opens its cookies/);
+
+    });
+
+    it('asks before it forgets the earlier keys, and then keeps the new one alone', async () => {
+
+        upstream   = false;
+        masterKeys = firstKeys;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read', 'timeserver:edit' ],
+                                ntsServer, root => root.querySelector('#master-keys') !== null);
+
+        root.querySelector<HTMLButtonElement>('#rotate-forget')!.click();
+
+        await until(() => /every earlier key is forgotten/.test(root.querySelector('#rotate-note')!.textContent!), 'the forgetting was not said');
+
+        assert.ok(said.some(text => /Forget every earlier master key\?/.test(text)), 'nobody was asked before the keys went');
+        assert.deepEqual(rotations(), [ { forget: true } ]);
+        assert.deepEqual([ ...root.querySelectorAll<HTMLElement>('tr[data-master-key]') ].map(row => row.dataset['masterKey']), [ '3' ]);
+
+    });
+
+    it('says what the server refused', async () => {
+
+        upstream   = false;
+        masterKeys = firstKeys;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read', 'timeserver:edit' ],
+                                asked => asked.path === '/ntsServer/masterKeys/rotate' ? refused(409, 'Nothing is answered at the moment') : ntsServer(asked),
+                                root => root.querySelector('#master-keys') !== null);
+
+        root.querySelector<HTMLButtonElement>('#rotate')!.click();
+
+        await until(() => root.querySelector('#rotate-error')!.textContent !== '', 'the refusal was not said');
+
+        assert.match(root.querySelector('#rotate-error')!.textContent!, /Nothing is answered at the moment/);
+        assert.equal(root.querySelectorAll('tr[data-master-key]').length, 2);
+
+    });
+
+    it('greys both out, with why, for whoever may only read the time server', async () => {
+
+        upstream   = false;
+        masterKeys = firstKeys;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read' ],
+                                ntsServer, root => root.querySelector('#master-keys') !== null);
+
+        for (const button of root.querySelectorAll<HTMLButtonElement>('#rotate, #rotate-forget'))
+        {
+            assert.equal(button.disabled, true, `${button.id} can be pressed`);
+            assert.match(button.title, /may read the time server but not change it/);
+        }
+
+    });
+
+    it('says there is none while nothing is answered', async () => {
+
+        upstream   = false;
+        masterKeys = [];
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read', 'timeserver:edit' ],
+                                ntsServer, root => root.querySelector('#master-keys') !== null);
+
+        assert.match(root.querySelector('#no-master-keys')!.textContent!, /nothing is answered at the moment/);
+        assert.equal(root.querySelector<HTMLButtonElement>('#rotate')!.disabled, true);
+
+        masterKeys = firstKeys;
 
     });
 

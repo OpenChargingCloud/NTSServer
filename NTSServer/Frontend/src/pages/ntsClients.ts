@@ -2,13 +2,17 @@ import { api,
          type KeyExchangeOverSSH,
          type NTSClient,
          type NTSClientEntry,
-         type SSHChange }  from '../api/client';
+         type NTSClientKey,
+         type SSHAccount,
+         type SSHActivity,
+         type SSHChange,
+         type SSHKeyBinding }  from '../api/client';
 import { auth } from '../auth';
 import { toURL } from '@node/basePath';
 import { must } from '@node/html';
 import type { Page } from '@node/router';
 import { mayButNot, reloadButton, shell } from '@node/shell';
-import { errorMessage, field, formatTimestamp, whileSaving } from '@node/ui';
+import { errorMessage, field, formatSince, formatTimestamp, whileSaving } from '@node/ui';
 import { anyFormTypedSinceDrawn, unsaved } from '@node/unsaved';
 import { html, nothing, render, repeat, type TemplateResult } from '@node/view';
 
@@ -22,6 +26,11 @@ import { html, nothing, render, repeat, type TemplateResult } from '@node/view';
  * it: a client switched off or removed can make no key exchange from then on,
  * and a session of it that is open ends. The two forms - a new client, and
  * another key of one - are drafts the page holds until they are sent.
+ *
+ * Beside each client, when it was last served - from where, with which option
+ * of the white paper, how many cookies - and when it was last turned away and
+ * why, since the program started; so for the accounts of the node that made
+ * key exchanges under their own names.
  */
 export const ntsClientsPage: Page = {
 
@@ -62,6 +71,7 @@ export const ntsClientsPage: Page = {
                 <div class="cards stacked">
                     ${serviceCard(ssh)}
                     ${clientsCard(ssh)}
+                    ${ssh.accounts.length > 0 ? accountsCard(ssh.accounts) : nothing}
                     ${addClientCard(ssh)}
                     ${ssh.clients.length > 0 ? addKeyCard(ssh) : nothing}
                 </div>
@@ -136,7 +146,7 @@ export const ntsClientsPage: Page = {
                               <div class="table-scroll">
                                   <table class="records nts-clients">
                                       <thead>
-                                          <tr><th>Name</th><th>Keys</th><th></th></tr>
+                                          <tr><th>Name</th><th>Keys</th><th>Last key exchange</th><th></th></tr>
                                       </thead>
                                       <tbody>
                                           ${repeat(SSH.clients, client => client.name, client => clientRow(client))}
@@ -170,14 +180,14 @@ export const ntsClientsPage: Page = {
                               : repeat(Client.keys, key => key.line, key => html`
                                   <div class="client-key" data-fingerprint="${key.fingerprint ?? ''}">
                                       <code class="fingerprint">${key.fingerprint ?? key.line}</code>
-                                      <span class="muted small">
-                                          ${key.algorithm ?? ''}${key.comment ? ` - ${key.comment}` : ''}${key.options !== undefined && key.options.length > 0 ? ` - ${key.options.join(', ')}` : ''}${key.notAfter ? ` - until ${formatTimestamp(key.notAfter)}` : ''}
-                                      </span>
+                                      ${key.certAuthority === true ? html`<span class="chip on" title="The key of an SSH CA: the user certificates it signs let the client in">CA</span>` : nothing}
+                                      <span class="muted small">${keyDetails(key, Client.name)}</span>
                                       <button type="button" class="btn small" data-remove-key="${key.line}" ?disabled=${!mayChange}
                                               @click=${() => void removeKey(Client, key.line)}>Remove key</button>
                                   </div>
                               `)}
                     </td>
+                    <td class="client-activity">${activityLines(Client.activity)}</td>
                     <td class="client-actions">
                         <button type="button" class="btn small" data-switch="${Client.name}" ?disabled=${!mayChange}
                                 @click=${() => void switchClient(Client)}>${Client.enabled ? 'Switch off' : 'Switch on'}</button>
@@ -185,6 +195,44 @@ export const ntsClientsPage: Page = {
                                 @click=${() => void removeClient(Client)}>Remove</button>
                     </td>
                 </tr>
+            `;
+
+        }
+
+
+        /**
+         * The accounts of the node that made key exchanges over SSH under
+         * their own names: what they may do is their roles', not this page's.
+         */
+        function accountsCard(Accounts: SSHAccount[]): TemplateResult {
+
+            return html`
+                <section class="card" id="accounts">
+
+                    <h2><i class="fa-solid fa-user"></i> Accounts</h2>
+
+                    <p class="hint">
+                        Accounts of this node that may run "ntske" made key exchanges over SSH under their own names.
+                        They are no NTS clients: what they may do is their roles'.
+                    </p>
+
+                    <div class="table-scroll">
+                        <table class="records nts-accounts">
+                            <thead>
+                                <tr><th>Account</th><th>Last key exchange</th></tr>
+                            </thead>
+                            <tbody>
+                                ${repeat(Accounts, account => account.name, account => html`
+                                    <tr data-account="${account.name}">
+                                        <td class="client-name"><strong>${account.name}</strong></td>
+                                        <td class="client-activity">${activityLines(account.activity)}</td>
+                                    </tr>
+                                `)}
+                            </tbody>
+                        </table>
+                    </div>
+
+                </section>
             `;
 
         }
@@ -213,6 +261,9 @@ export const ntsClientsPage: Page = {
                                 One line of an <code>authorized_keys</code> file: the public key, as
                                 <code>ssh-keygen</code> wrote it. <code>from="192.168.1.0/24"</code> or
                                 <code>expiry-time="20271231"</code> in front of it hold as OpenSSH holds them.
+                                With <code>cert-authority</code> in front, it is the key of an SSH CA: the user
+                                certificates it signs let the client in where they are made out to its name - or, with
+                                <code>principals="station-2"</code>, to one of the names there.
                             </span>
                         </label>
 
@@ -432,4 +483,88 @@ export function entriesOf(SSH: KeyExchangeOverSSH): NTSClientEntry[] {
  */
 export function oneLine(Text: string): string {
     return Text.split(/\r?\n/).map(part => part.trim()).filter(part => part.length > 0).join('');
+}
+
+
+/**
+ * What a key is, beside its fingerprint: its algorithm, for the key of a CA
+ * the names its certificates have to be made out to, its comment, its other
+ * options and its end.
+ */
+export function keyDetails(Key: NTSClientKey, ClientName: string): string {
+
+    const isCA    = Key.certAuthority === true;
+
+    // A CA's own options are said in words, not as they were written.
+    const options = (Key.options ?? []).filter(option => !isCA || !/^(cert-authority$|principals=)/i.test(option));
+
+    return [
+               Key.algorithm ?? '',
+               isCA ? `certificates made out to ${(Key.principals ?? [ ClientName ]).join(', ')}` : '',
+               Key.comment ?? '',
+               options.join(', '),
+               Key.notAfter ? `until ${formatTimestamp(Key.notAfter)}` : ''
+           ].filter(part => part.length > 0).join(' - ');
+
+}
+
+
+/**
+ * When a login was last served and how, when it was last turned away and why,
+ * and how often each since the program started.
+ */
+export function activityLines(Activity: SSHActivity): TemplateResult {
+
+    const served   = Activity.lastServed;
+    const refused  = Activity.lastRefused;
+
+    if (served === null && refused === null)
+        return html`<span class="muted">no key exchange since the start</span>`;
+
+    return html`
+        ${served !== null ? html`
+            <div class="last-served">
+                <span class="chip ok">served</span> ${formatTimestamp(served.at)} <span class="muted">(${formatSince(served.at)})</span>
+                <div class="muted small">
+                    ${[ served.from !== null ? `from ${served.from}` : '',
+                        methodWords(served.method),
+                        served.aeadAlgorithm !== null ? aeadName(served.aeadAlgorithm) : '',
+                        `${served.cookies} cookie${served.cookies === 1 ? '' : 's'}` ].filter(part => part.length > 0).join(', ')}
+                </div>
+            </div>
+        ` : nothing}
+        ${refused !== null ? html`
+            <div class="last-refused">
+                <span class="chip warn">turned away</span> ${formatTimestamp(refused.at)} <span class="muted">(${formatSince(refused.at)})</span>
+                <div class="muted small">${refused.from !== null ? `from ${refused.from}: ` : ''}${refused.why ?? 'no reason given'}</div>
+            </div>
+        ` : nothing}
+        <div class="muted small activity-counts">
+            ${Activity.served} served and ${Activity.refused} turned away since the start, ${Activity.cookies} cookie${Activity.cookies === 1 ? '' : 's'} in all
+        </div>
+    `;
+
+}
+
+
+/** Where the keys came from, as the white paper "NTS Key Establishment over SSH" names the two options. */
+export function methodWords(Method: SSHKeyBinding): string {
+    return Method === 'exporter'
+               ? 'option A, the exporter of the connection'
+               : 'option B, a transported secret';
+}
+
+
+/** The AEAD algorithms NTS uses (IANA "AEAD Algorithms"), by the ids the key exchange says them with. */
+const aeadNames: Record<number, string> = {
+    15:  'AEAD_AES_SIV_CMAC_256',
+    16:  'AEAD_AES_SIV_CMAC_384',
+    17:  'AEAD_AES_SIV_CMAC_512',
+    30:  'AEAD_AES_128_GCM_SIV',
+    31:  'AEAD_AES_256_GCM_SIV'
+};
+
+/** An AEAD algorithm by its name, where it is one NTS uses, and by its id otherwise. */
+export function aeadName(Id: number): string {
+    return aeadNames[Id] ?? `AEAD algorithm ${Id}`;
 }

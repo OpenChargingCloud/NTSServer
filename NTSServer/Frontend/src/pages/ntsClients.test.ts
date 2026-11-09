@@ -3,7 +3,9 @@
  * NTS server that keeps what it is sent: a client added, another key of one,
  * one switched off and removed, NTS-KE over SSH switched off - each sent as
  * the whole list, and drawn as the server answers. And for whoever may only
- * look, nothing that changes anything.
+ * look, nothing that changes anything. Beside each client, and each account
+ * that made key exchanges, when it was last served and turned away; the key
+ * of a CA, with the names its certificates are made out to.
  */
 
 import { asked, field, open, refused, said, submit, type, until, type Asked } from '../../test/ntsServer.ts';
@@ -11,15 +13,19 @@ import { asked, field, open, refused, said, submit, type, until, type Asked } fr
 import { strict as assert }  from 'node:assert';
 import { describe, it }      from 'node:test';
 
-const { ntsClientsPage, entriesOf, oneLine } = await import('./ntsClients.ts');
+const { ntsClientsPage, entriesOf, oneLine, keyDetails, aeadName } = await import('./ntsClients.ts');
 
 
 interface Entry { name: string; keys: string[]; enabled: boolean }
 
 const keyOf = (Name: string) => `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${Name} ${Name}`;
 
+const none = { served: 0, refused: 0, cookies: 0, lastServed: null, lastRefused: null };
+
 let enabled  = true;
 let clients: Entry[] = [];
+let activities: Record<string, unknown> = {};
+let accounts: unknown[] = [];
 
 function ssh(): Record<string, unknown> {
 
@@ -30,10 +36,16 @@ function ssh(): Record<string, unknown> {
         url:        'ssh://192.168.1.2:22361',
         hostKey:    'SHA256:host',
         clients:    clients.map(client => ({
-                        name:     client.name,
-                        enabled:  client.enabled,
-                        keys:     client.keys.map(line => ({ line, algorithm: 'ssh-ed25519', fingerprint: `SHA256:${line.split(' ')[2]}`, comment: line.split(' ')[2], options: [] }))
-                    }))
+                        name:      client.name,
+                        enabled:   client.enabled,
+                        keys:      client.keys.map(line => line.startsWith('cert-authority')
+                                                               ? { line, algorithm: 'ssh-ed25519', fingerprint: 'SHA256:ca', comment: 'station CA',
+                                                                   options: [ 'cert-authority', 'principals="station-2,station-3"', 'from="10.0.0.0/8"' ],
+                                                                   certAuthority: true, principals: [ 'station-2', 'station-3' ] }
+                                                               : { line, algorithm: 'ssh-ed25519', fingerprint: `SHA256:${line.split(' ')[2]}`, comment: line.split(' ')[2], options: [] }),
+                        activity:  activities[client.name] ?? none
+                    })),
+        accounts
     };
 
 }
@@ -202,6 +214,64 @@ describe('the NTS clients', () => {
 
     });
 
+    it('shows beside each client when it was last served - from where, with which option - and when it was turned away', async () => {
+
+        enabled    = true;
+        clients    = [ { name: 'cs001', keys: [ keyOf('cs001') ], enabled: true },
+                       { name: 'cs002', keys: [ keyOf('cs002') ], enabled: true } ];
+        activities = { cs001: { served: 3, refused: 1, cookies: 24,
+                                lastServed:  { at: '2026-11-09T12:20:00Z', from: '192.168.1.17:50022', method: 'exporter', aeadAlgorithm: 15, cookies: 8 },
+                                lastRefused: { at: '2026-11-09T11:00:00Z', from: '192.168.1.17:50010', why: 'the client is switched off' } } };
+
+        const root = await open(ntsClientsPage, '/ntsServer/clients', [ 'timeserver:read' ],
+                                ntsServer, root => root.querySelector('tr[data-client="cs001"]') !== null);
+
+        const cs001 = root.querySelector('tr[data-client="cs001"] .client-activity')!.textContent!.replace(/\s+/g, ' ');
+
+        assert.match(cs001, /served .* ago\)/);
+        assert.match(cs001, /from 192\.168\.1\.17:50022, option A, the exporter of the connection, AEAD_AES_SIV_CMAC_256, 8 cookies/);
+        assert.match(cs001, /turned away .* from 192\.168\.1\.17:50010: the client is switched off/);
+        assert.match(cs001, /3 served and 1 turned away since the start, 24 cookies in all/);
+
+        assert.match(root.querySelector('tr[data-client="cs002"] .client-activity')!.textContent!, /no key exchange since the start/);
+        assert.equal(root.querySelector('#accounts'), null, 'an accounts card, with no account that made a key exchange');
+
+        activities = {};
+
+    });
+
+    it('lists the accounts that made key exchanges under their own names', async () => {
+
+        enabled  = true;
+        clients  = [];
+        accounts = [ { name: 'alice', activity: { served: 1, refused: 0, cookies: 8, lastRefused: null,
+                                                  lastServed: { at: '2026-11-09T12:25:00Z', from: '127.0.0.1:50100', method: 'transport', aeadAlgorithm: 30, cookies: 8 } } } ];
+
+        const root = await open(ntsClientsPage, '/ntsServer/clients', [ 'timeserver:read' ],
+                                ntsServer, root => root.querySelector('#accounts') !== null);
+
+        assert.match(root.querySelector('tr[data-account="alice"]')!.textContent!.replace(/\s+/g, ' '),
+                     /from 127\.0\.0\.1:50100, option B, a transported secret, AEAD_AES_128_GCM_SIV, 8 cookies/);
+
+        accounts = [];
+
+    });
+
+    it('shows the key of a CA as one, with the names its certificates are made out to', async () => {
+
+        enabled = true;
+        clients = [ { name: 'cs002', keys: [ 'cert-authority,principals="station-2,station-3",from="10.0.0.0/8" ssh-ed25519 AAAA station CA' ], enabled: true } ];
+
+        const root = await open(ntsClientsPage, '/ntsServer/clients', [ 'timeserver:read' ],
+                                ntsServer, root => root.querySelector('tr[data-client="cs002"]') !== null);
+
+        const key = root.querySelector('tr[data-client="cs002"] .client-key')!;
+
+        assert.equal(key.querySelector('.chip')!.textContent, 'CA');
+        assert.equal(key.querySelector('.muted')!.textContent, 'ssh-ed25519 - certificates made out to station-2, station-3 - station CA - from="10.0.0.0/8"');
+
+    });
+
 });
 
 
@@ -209,9 +279,29 @@ describe('the NTS clients as they are sent', () => {
 
     it('sends each key back as the line it was given as', () => {
 
-        assert.deepEqual(entriesOf({ enabled: true, served: true, subsystem: 's', url: null, hostKey: null,
-                                     clients: [ { name: 'cs001', enabled: false, keys: [ { line: 'from="10.0.0.0/8" ssh-ed25519 AAAA cs001', fingerprint: 'SHA256:x' } ] } ] }),
+        assert.deepEqual(entriesOf({ enabled: true, served: true, subsystem: 's', url: null, hostKey: null, accounts: [],
+                                     clients: [ { name: 'cs001', enabled: false, activity: none,
+                                                  keys: [ { line: 'from="10.0.0.0/8" ssh-ed25519 AAAA cs001', fingerprint: 'SHA256:x' } ] } ] }),
                          [ { name: 'cs001', keys: [ 'from="10.0.0.0/8" ssh-ed25519 AAAA cs001' ], enabled: false } ]);
+
+    });
+
+    it('says the key of a CA without a principals option as made out to the client itself', () => {
+
+        assert.equal(keyDetails({ line: 'cert-authority ssh-ed25519 AAAA', algorithm: 'ssh-ed25519', options: [ 'cert-authority' ],
+                                  certAuthority: true, principals: null }, 'cs007'),
+                     'ssh-ed25519 - certificates made out to cs007');
+
+        assert.equal(keyDetails({ line: 'ssh-ed25519 AAAA cs001', algorithm: 'ssh-ed25519', comment: 'cs001', options: [ 'no-pty' ] }, 'cs001'),
+                     'ssh-ed25519 - cs001 - no-pty');
+
+    });
+
+    it('names the AEAD algorithms NTS uses, and says any other by its id', () => {
+
+        assert.equal(aeadName(15), 'AEAD_AES_SIV_CMAC_256');
+        assert.equal(aeadName(30), 'AEAD_AES_128_GCM_SIV');
+        assert.equal(aeadName(99), 'AEAD algorithm 99');
 
     });
 

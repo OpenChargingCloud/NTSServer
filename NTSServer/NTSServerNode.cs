@@ -1041,25 +1041,11 @@ namespace cloud.charging.open.NTSServer
                                                               new JProperty("name",      client.Name),
                                                               new JProperty("enabled",   client.Enabled),
                                                               new JProperty("keys",      client.Keys.Count),
-                                                              new JProperty("activity",  Host.SSHActivity.TryGetValue(client.Name, out var activity)
-                                                                                             ? activity.ToJSON()
-                                                                                             : NTSClientActivity.None.ToJSON())
+                                                              new JProperty("activity",  ActivityJSON(client.Name))
                                                           )))),
-                           // Accounts allowed to run "ntske" that made key exchanges.
-                           new JProperty("accounts",      new JArray(Host.SSHActivity.
-                                                                         Where  (activity => !SSHClients.Knows(activity.Key)).
-                                                                         OrderBy(activity => activity.Key, StringComparer.OrdinalIgnoreCase).
-                                                                         Select (activity => new JObject(
-                                                                                                 new JProperty("name",      activity.Key),
-                                                                                                 new JProperty("activity",  activity.Value.ToJSON())
-                                                                                             ))))
+                           new JProperty("accounts",      AccountsJSON())
                        )),
-                       new JProperty("masterKeys",    new JArray(Host.MasterKeys.Select(key => new JObject(
-                                                          new JProperty("id",         key.Id),
-                                                          new JProperty("notBefore",  key.NotBefore.ToString("o")),
-                                                          new JProperty("notAfter",   key.NotAfter. ToString("o")),
-                                                          new JProperty("current",    key.IsCurrent)
-                                                      )))),
+                       new JProperty("masterKeys",    MasterKeysJSON()),
                        new JProperty("clock",         new JObject(
                            new JProperty("now",           now.ToString("o")),
                            new JProperty("base",          Clock.IsFreeRunning ? "free-running" : "system"),
@@ -1084,7 +1070,9 @@ namespace cloud.charging.open.NTSServer
         /// switched on and served, where a client reaches it and what host key
         /// it holds the server to - and the NTS clients, each key with what it
         /// is: its algorithm, its fingerprint, its comment and its options,
-        /// beside the line it was given as, which is what is sent back.
+        /// beside the line it was given as, which is what is sent back; and
+        /// each client with what it made of NTS-KE over SSH since the start,
+        /// as the accounts that made key exchanges are.
         /// </summary>
         public JObject SSHJSON()
 
@@ -1097,8 +1085,54 @@ namespace cloud.charging.open.NTSServer
                    new JProperty("clients",    new JArray(Settings.SSHClients.Select(client => new JObject(
                        new JProperty("name",       client.Name),
                        new JProperty("enabled",    client.Enabled),
-                       new JProperty("keys",       new JArray(client.Keys.Select(KeyJSON)))
-                   ))))
+                       new JProperty("keys",       new JArray(client.Keys.Select(KeyJSON))),
+                       new JProperty("activity",   ActivityJSON(client.Name))
+                   )))),
+                   new JProperty("accounts",   AccountsJSON())
+               );
+
+        /// <summary>
+        /// What the login of this name made of NTS-KE over SSH since the start:
+        /// when it was last served and how, when it was last turned away and why.
+        /// </summary>
+        private JObject ActivityJSON(String Name)
+
+            => (Host.SSHActivity.TryGetValue(Name, out var activity)
+                    ? activity
+                    : NTSClientActivity.None).ToJSON();
+
+        /// <summary>
+        /// The logins that made key exchanges over SSH but are no NTS client:
+        /// accounts of the node that may run "ntske", each with what it made of it.
+        /// </summary>
+        private JArray AccountsJSON()
+
+            => new (Host.SSHActivity.
+                        Where  (activity => !SSHClients.Knows(activity.Key)).
+                        OrderBy(activity => activity.Key, StringComparer.OrdinalIgnoreCase).
+                        Select (activity => new JObject(
+                                                new JProperty("name",      activity.Key),
+                                                new JProperty("activity",  activity.Value.ToJSON())
+                                            )));
+
+        /// <summary>
+        /// The master keys the cookies are sealed with, oldest first: their ids
+        /// and when they are valid, and which one seals now - never their values.
+        /// </summary>
+        public JArray MasterKeysJSON()
+
+            => new (Host.MasterKeys.Select(MasterKeyJSON));
+
+        /// <summary>
+        /// One master key of the cookies, without its value.
+        /// </summary>
+        public static JObject MasterKeyJSON(MasterKeyInfo Key)
+
+            => new (
+                   new JProperty("id",         Key.Id),
+                   new JProperty("notBefore",  Key.NotBefore.ToString("o")),
+                   new JProperty("notAfter",   Key.NotAfter. ToString("o")),
+                   new JProperty("current",    Key.IsCurrent)
                );
 
         private static JObject KeyJSON(String Line)

@@ -77,6 +77,14 @@ namespace cloud.charging.open.NTSServer.SecureShell
 
 
         /// <summary>
+        /// Why a key exchange brought no cookies: the problem it ran into, or the
+        /// Error record of its answer.
+        /// </summary>
+        public static String WhyOf(NTSKEOverSSHExchange Exchange)
+            => Exchange.Problem
+                   ?? (Exchange.ErrorCode is NTSKEErrorCodes errorCode ? $"answered with the Error record {errorCode}" : "no reason given");
+
+        /// <summary>
         /// As the status of the JSON API says it.
         /// </summary>
         public JObject ToJSON()
@@ -98,7 +106,7 @@ namespace cloud.charging.open.NTSServer.SecureShell
                                                      ? new JObject(
                                                            new JProperty("at",             refused.Timestamp.ToString("o")),
                                                            new JProperty("from",           refused.Session.Peer?.ToString()),
-                                                           new JProperty("why",            refused.Problem)
+                                                           new JProperty("why",            WhyOf(refused))
                                                        )
                                                      : null)
                );

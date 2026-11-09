@@ -135,6 +135,50 @@ export interface NTSKEIdentity {
     pem:          string;
 }
 
+/**
+ * Where the keys of a key exchange over SSH came from (section 4 of the white
+ * paper "NTS Key Establishment over SSH"): option A, the exporter of the SSH
+ * connection, or option B, a secret the server sent within it.
+ */
+export type SSHKeyBinding = 'exporter' | 'transport';
+
+/**
+ * What one login made of NTS-KE over SSH since the program started: when it
+ * was last served and how, when it was last turned away and why, and how
+ * often. Kept in memory only - what lasts is in the log.
+ */
+export interface SSHActivity {
+    served:       number;
+    refused:      number;
+    /** How many cookies went out in all. */
+    cookies:      number;
+    lastServed:   { at: string; from: string | null; method: SSHKeyBinding; aeadAlgorithm: number | null; cookies: number } | null;
+    lastRefused:  { at: string; from: string | null; why: string | null } | null;
+}
+
+/** A login that made key exchanges over SSH but is no NTS client: an account of the node that may run "ntske". */
+export interface SSHAccount {
+    name:      string;
+    activity:  SSHActivity;
+}
+
+/** One master key the cookies are sealed with: its id and when it is valid - never its value. */
+export interface MasterKey {
+    id:         number;
+    notBefore:  string;
+    notAfter:   string;
+    /** Whether it seals the cookies made now; the others still open the cookies they sealed. */
+    current:    boolean;
+}
+
+/** What a rotation of the master key answers: POST /ntsServer/masterKeys/rotate. */
+export interface MasterKeyRotation {
+    rotated:     MasterKey;
+    /** Whether the earlier keys were forgotten at once. */
+    forgotten:   boolean;
+    masterKeys:  MasterKey[];
+}
+
 /** How the time server stands: GET /ntsServer. */
 export interface TimeServerStatus {
     timeSource:    TimeSource;
@@ -147,7 +191,10 @@ export interface TimeServerStatus {
     ntsKE:         { port: number; tls: NTSKEIdentity };
     ntp:           { port: number; advertised: string | null };
     ssh:           { enabled: boolean; served: boolean; subsystem: string; url: string | null; hostKey: string | null;
-                     clients: { name: string; enabled: boolean; keys: number }[] };
+                     clients: { name: string; enabled: boolean; keys: number; activity: SSHActivity }[];
+                     accounts: SSHAccount[] };
+    /** The master keys of the cookies, oldest first. None while nothing is answered. */
+    masterKeys:    MasterKey[];
     clock:         { now: string; base: 'free-running' | 'system'; correctionMs: number; frequencyPPM: number;
                      /** The leap seconds made since the start, added up. */
                      leapSeconds: number;
@@ -169,13 +216,18 @@ export interface NTSClientKey {
     /** Until when it may sign in, where its line says so. */
     notAfter?:     string | null;
     options?:      string[];
+    /** Whether it is the key of an SSH CA, whose user certificates let the client in. */
+    certAuthority?:  boolean;
+    /** The names a certificate of the CA has to be made out to - null for the client's own name. */
+    principals?:     string[] | null;
 }
 
 /** One machine that may make key exchanges over SSH, under its name, with one of its keys. */
 export interface NTSClient {
-    name:     string;
-    enabled:  boolean;
-    keys:     NTSClientKey[];
+    name:      string;
+    enabled:   boolean;
+    keys:      NTSClientKey[];
+    activity:  SSHActivity;
 }
 
 /** NTS-KE over SSH and the NTS clients: GET and PUT /ntsServer/ssh. */
@@ -188,6 +240,8 @@ export interface KeyExchangeOverSSH {
     /** The host key a client holds the server to. */
     hostKey:    string | null;
     clients:    NTSClient[];
+    /** The accounts of the node that made key exchanges over SSH. */
+    accounts:   SSHAccount[];
 }
 
 /** One NTS client as it is sent: its keys as authorized_keys lines. */
@@ -282,7 +336,8 @@ export const api = {
         setSettings:  (change: TimeServerSettingsChange)   => request<TimeServerSettingsChanged>('PUT',  '/ntsServer/settings', change),
         sync:      ()                   => request<UpstreamStatus>     ('POST', '/ntsServer/sync', undefined, roundWithin),
         ssh:       ()                   => request<KeyExchangeOverSSH> ('GET',  '/ntsServer/ssh'),
-        setSSH:    (change: SSHChange)  => request<KeyExchangeOverSSH> ('PUT',  '/ntsServer/ssh', change)
+        setSSH:    (change: SSHChange)  => request<KeyExchangeOverSSH> ('PUT',  '/ntsServer/ssh', change),
+        rotateMasterKey: (forget: boolean) => request<MasterKeyRotation>('POST', '/ntsServer/masterKeys/rotate', { forget })
     }
 
 };

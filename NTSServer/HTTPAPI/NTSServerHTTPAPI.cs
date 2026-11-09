@@ -20,6 +20,7 @@
 using Newtonsoft.Json.Linq;
 
 using org.GraphDefined.Vanaheimr.Hermod.HTTP;
+using org.GraphDefined.Vanaheimr.Norn.NTS;
 
 using cloud.charging.open.protocols.WWCP.Node.Web;
 using cloud.charging.open.protocols.WWCP.Node.Logging;
@@ -39,7 +40,9 @@ namespace cloud.charging.open.NTSServer
     ///   <item>GET  /api/v1/ntsServer/settings    - the "ntsServer" section as it is in effect.</item>
     ///   <item>PUT  /api/v1/ntsServer/settings    - the section or any part of it but "ssh": in effect at once, and saved - answered with { "settings", "changed", "notes" }.</item>
     ///   <item>POST /api/v1/ntsServer/sync        - ask the upstream servers now, in upstream mode.</item>
+    ///   <item>GET  /api/v1/ntsServer/ssh         - NTS-KE over SSH, the NTS clients with their keys, and what each login made of it since the start.</item>
     ///   <item>PUT  /api/v1/ntsServer/ssh         - { "enabled", "clients": [ { "name", "keys", "enabled" } ] }: NTS-KE over SSH, and who may use it.</item>
+    ///   <item>POST /api/v1/ntsServer/masterKeys/rotate - { "forget" }: seal the cookies with a new master key from now on, and forget the earlier ones at once where asked.</item>
     /// </list>
     /// </remarks>
     public class NTSServerHTTPAPI : NodeHTTPAPI
@@ -85,6 +88,7 @@ namespace cloud.charging.open.NTSServer
             AddHandler(root + "/sync",      PostSync,     HTTPMethod.POST);
             AddHandler(root + "/ssh",       GetSSH,       HTTPMethod.GET);
             AddHandler(root + "/ssh",       PutSSH,       HTTPMethod.PUT);
+            AddHandler(root + "/masterKeys/rotate", PostRotateMasterKey, HTTPMethod.POST);
 
         }
 
@@ -243,6 +247,62 @@ namespace cloud.charging.open.NTSServer
             }
 
             return Task.FromResult(JSONResponse(Request, HTTPStatusCode.OK, NTSServer.SSHJSON()));
+
+        }
+
+        #endregion
+
+        #region (private) PostRotateMasterKey(Request)
+
+        /// <summary>
+        /// Seal the cookies with a new master key from now on - the "rotate the
+        /// cookie master key" of section 8.2 of the white paper "NTS Key
+        /// Establishment over SSH", as the command line's "masterKeys rotate".
+        /// The earlier keys still open their cookies until their grace period
+        /// is over; with { "forget": true } they are forgotten at once, for a
+        /// key that may have been read, and every client makes a new key
+        /// exchange. Answered with the new key and every key kept - never a
+        /// value.
+        /// </summary>
+        private Task<HTTPResponse> PostRotateMasterKey(HTTPRequest Request)
+        {
+
+            if (!TryAuthorize(Request, Permission.Edit(NTSServerAccess.TimeServer), true, out var user, out var refused))
+                return Task.FromResult(refused);
+
+            var forget = false;
+
+            if (!String.IsNullOrWhiteSpace(Request.HTTPBodyAsUTF8String))
+            {
+
+                if (!TryParseJSONObject(Request, out var json, out var badRequest))
+                    return Task.FromResult(badRequest);
+
+                if (json["forget"] is JToken forgetToken && forgetToken.Type != JTokenType.Null)
+                {
+
+                    if (forgetToken.Type != JTokenType.Boolean)
+                        return Task.FromResult(ErrorJSON(Request, HTTPStatusCode.BadRequest, "\"forget\" is true or false."));
+
+                    forget = forgetToken.Value<Boolean>();
+
+                }
+
+            }
+
+            if (NTSServer.Host.RotateMasterKey(ForgetTheOthers: forget) is not MasterKeyInfo rotated)
+                return Task.FromResult(ErrorJSON(Request, HTTPStatusCode.Conflict, "Nothing is answered at the moment, so no cookie is sealed: there is no master key to rotate."));
+
+            Log.Notice(forget
+                           ? $"'{user.Id}' sealed the cookies with the new master key {rotated.Id} and forgot every earlier key: their cookies are refused, and every client makes a new key exchange."
+                           : $"'{user.Id}' sealed the cookies with the new master key {rotated.Id}. The earlier keys still open their cookies until their grace period is over.",
+                       "ntsserver", "keys");
+
+            return Task.FromResult(JSONResponse(Request, HTTPStatusCode.OK, new JObject(
+                                                                                new JProperty("rotated",     NTSServerNode.MasterKeyJSON(rotated)),
+                                                                                new JProperty("forgotten",   forget),
+                                                                                new JProperty("masterKeys",  NTSServer.MasterKeysJSON())
+                                                                            )));
 
         }
 

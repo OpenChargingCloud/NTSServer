@@ -682,7 +682,7 @@ namespace cloud.charging.open.NTSServer
                            "ntsserver", "ssh");
 
             else
-                log.Notice($"NTS-KE over SSH: '{name}' from {Exchange.Session.Peer?.ToString() ?? "a tunnel"} got no cookies: {Exchange.Problem}.",
+                log.Notice($"NTS-KE over SSH: '{name}' from {Exchange.Session.Peer?.ToString() ?? "a tunnel"} got no cookies: {NTSClientActivity.WhyOf(Exchange).TrimEnd('.')}.",
                            "ntsserver", "ssh");
 
         }

@@ -1,5 +1,6 @@
 import { api,
          type ClockDescription,
+         type MasterKey,
          type TimeServerStatus,
          type UpstreamStatus }  from '../api/client';
 import { auth } from '../auth';
@@ -14,9 +15,12 @@ import { html, nothing, render, type TemplateResult } from '@node/view';
  * upstream servers were at the last round, what NTS-KE over TLS shows and
  * how a client is told to trust it, and how much it answered.
  *
- * Read-only but for one button, "Ask them now", for whoever may run the
- * node's time servers. What changes is the configuration file's, the NTS
- * clients page's and the Server identities page's.
+ * Read-only but for two things: "Ask them now", for whoever may run the
+ * node's time servers, and a new master key of the cookies, for whoever may
+ * change the time server - the "rotate the cookie master key" of section 8.2
+ * of the white paper "NTS Key Establishment over SSH". What changes otherwise
+ * is the configuration file's, the NTS clients page's and the Server
+ * identities page's.
  */
 export const timeServerPage: Page = {
 
@@ -33,12 +37,15 @@ export const timeServerPage: Page = {
 
         render(content, html`<div class="loading">Loading ...</div>`);
 
-        const mayAsk = auth.can('nts', 'run');
+        const mayAsk     = auth.can('nts', 'run');
+        const mayRotate  = auth.can('timeserver', 'edit');
 
         let cancelled  = false;
         let current: TimeServerStatus | null = null;
         let asked: string | null = null;
         let askFailed: string | null = null;
+        let rotated: string | null = null;
+        let rotateFailed: string | null = null;
 
 
         function draw(): void {
@@ -56,6 +63,7 @@ export const timeServerPage: Page = {
                     ${ntsKECard(status)}
                     ${ntpCard(status)}
                     ${sshCard(status)}
+                    ${masterKeysCard(status.masterKeys)}
                     ${answeredCard(status)}
                 </div>
 
@@ -246,6 +254,12 @@ export const timeServerPage: Page = {
 
             const ssh     = Status.ssh;
             const enabled = ssh.clients.filter(client => client.enabled).length;
+            const logins  = [ ...ssh.clients, ...ssh.accounts ].map(login => login.activity);
+            const served  = logins.reduce((sum, activity) => sum + activity.served,  0);
+            const refused = logins.reduce((sum, activity) => sum + activity.refused, 0);
+            const last    = logins.map(activity => activity.lastServed?.at).
+                                   filter((at): at is string => at !== undefined).
+                                   sort().at(-1);
 
             return html`
                 <section class="card" id="ntske-ssh">
@@ -262,6 +276,72 @@ export const timeServerPage: Page = {
                         ${kv('Subsystem',    html`<code>${ssh.subsystem}</code>`)}
                         ${kv('Host key',     ssh.hostKey ?? 'not known yet')}
                         ${kv('NTS clients',  html`<a href="${toURL('/ntsServer/clients')}">${ssh.clients.length} - ${enabled} of them switched on</a>`)}
+                        ${kv('Key exchanges', html`<span id="ssh-exchanges">${served} served and ${refused} turned away since the start${last !== undefined ? `, the last served ${formatSince(last)}` : ''}</span>`)}
+                    </div>
+
+                </section>
+            `;
+
+        }
+
+
+        /**
+         * The master keys the cookies are sealed with - ids and validity,
+         * never values - and a new one: the earlier keys still open their
+         * cookies until their grace period is over, or are forgotten at once.
+         */
+        function masterKeysCard(Keys: MasterKey[]): TemplateResult {
+
+            const notAllowed = mayButNot('read the time server', 'change it');
+
+            return html`
+                <section class="card" id="master-keys">
+
+                    <h2><i class="fa-solid fa-key"></i> Master keys of the cookies</h2>
+
+                    ${Keys.length === 0
+                          ? html`<p class="hint" id="no-master-keys">None: nothing is answered at the moment, so no cookie is sealed.</p>`
+                          : html`
+                              <div class="table-scroll">
+                                  <table class="records master-keys">
+                                      <thead>
+                                          <tr><th>Id</th><th>Valid from</th><th>Until</th><th></th></tr>
+                                      </thead>
+                                      <tbody>
+                                          ${Keys.map(key => html`
+                                              <tr data-master-key="${key.id}" class="${key.current ? 'current' : ''}">
+                                                  <td><code>${key.id}</code></td>
+                                                  <td>${formatTimestamp(key.notBefore, toTheMinute)}</td>
+                                                  <td>${formatTimestamp(key.notAfter,  toTheMinute)}</td>
+                                                  <td>${key.current
+                                                            ? html`<span class="chip on" title="It seals the cookies made now">seals now</span>`
+                                                            : html`<span class="muted" title="It no longer seals cookies, but opens those it sealed">opens its cookies</span>`}</td>
+                                              </tr>
+                                          `)}
+                                      </tbody>
+                                  </table>
+                              </div>
+                          `}
+
+                    <p class="hint">
+                        A new key seals the cookies from now on, and the clients move to it with the cookies NTP hands
+                        them. A key that may have been read is forgotten with the others at once: every cookie they
+                        sealed is refused, and every client makes a new key exchange.
+                    </p>
+
+                    <div class="form-actions">
+                        <button type="button" class="btn" id="rotate" ?disabled=${!mayRotate || Keys.length === 0}
+                                title=${mayRotate ? 'Seal the cookies with a new master key from now on' : notAllowed}
+                                @click=${() => void rotate(false)}>
+                            <i class="fa-solid fa-rotate"></i> New master key
+                        </button>
+                        <button type="button" class="btn danger" id="rotate-forget" ?disabled=${!mayRotate || Keys.length === 0}
+                                title=${mayRotate ? 'A new master key, and every earlier one forgotten at once' : notAllowed}
+                                @click=${() => void rotate(true)}>
+                            New key, and forget the others
+                        </button>
+                        <span id="rotate-note"  class="form-notice" role="status"></span>
+                        <span id="rotate-error" class="form-error"  role="alert"></span>
                     </div>
 
                 </section>
@@ -324,17 +404,57 @@ export const timeServerPage: Page = {
         }
 
 
-        /** What asking the upstream servers came to, in its two lines. */
+        /**
+         * Seal the cookies with a new master key, and say what came of it -
+         * asked first where the earlier keys are to be forgotten, as that ends
+         * every client's cookies.
+         */
+        async function rotate(Forget: boolean): Promise<void> {
+
+            if (Forget && !confirm('Forget every earlier master key? Every cookie they sealed is refused from now on, and every client has to make a new key exchange.'))
+                return;
+
+            rotated      = null;
+            rotateFailed = null;
+            say();
+
+            try
+            {
+                const rotation = await whileSaving(content, content.querySelector<HTMLElement>('#rotate-note'), () => api.ntsServer.rotateMasterKey(Forget));
+
+                rotated = rotation.forgotten
+                              ? `The cookies are sealed with the new master key ${rotation.rotated.id} from now on, and every earlier key is forgotten.`
+                              : `The cookies are sealed with the new master key ${rotation.rotated.id} from now on; the earlier keys still open their cookies.`;
+
+                await load();
+            }
+            catch (problem)
+            {
+                rotateFailed = errorMessage(problem);
+            }
+
+            say();
+
+        }
+
+
+        /** What asking the upstream servers and a new master key came to, each in its two lines. */
         function say(): void {
 
-            const note  = content.querySelector<HTMLElement>('#ask-note');
-            const error = content.querySelector<HTMLElement>('#ask-error');
+            const lines: [ string, string | null ][] = [ [ '#ask-note',    asked        ],
+                                                         [ '#ask-error',   askFailed    ],
+                                                         [ '#rotate-note', rotated      ],
+                                                         [ '#rotate-error', rotateFailed ] ];
 
-            if (note !== null)
-                note.textContent  = asked ?? '';
+            for (const [ selector, text ] of lines)
+            {
 
-            if (error !== null)
-                error.textContent = askFailed ?? '';
+                const line = content.querySelector<HTMLElement>(selector);
+
+                if (line !== null)
+                    line.textContent = text ?? '';
+
+            }
 
         }
 
@@ -389,6 +509,9 @@ export const timeServerPage: Page = {
 
 };
 
+
+/** When a master key is valid: to the minute, as a key is made once a day. */
+const toTheMinute = new Intl.DateTimeFormat([], { dateStyle: 'medium', timeStyle: 'short' });
 
 /** One line of a card. */
 function kv(Name: string, Value: string | TemplateResult): TemplateResult {

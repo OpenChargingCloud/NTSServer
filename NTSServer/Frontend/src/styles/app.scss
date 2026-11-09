@@ -69,6 +69,11 @@ table.records.nts-clients {
         white-space: normal;
     }
 
+    td.client-activity {
+        white-space:  normal;
+        min-width:    16rem;
+    }
+
     .client-key {
 
         display:      flex;
@@ -126,4 +131,27 @@ form.settings-form {
         }
     }
 
+}
+
+// When a client or an account was last served and turned away: lines that
+// wrap rather than push the table wider than its card.
+table.records.nts-accounts td.client-activity {
+    white-space:  normal;
+    min-width:    16rem;
+}
+
+table.records.nts-clients .client-activity,
+table.records.nts-accounts .client-activity {
+
+    .last-served + .last-refused,
+    .last-served + .activity-counts,
+    .last-refused + .activity-counts {
+        margin-top: 0.3rem;
+    }
+
+}
+
+// The master key that seals the cookies made now.
+table.records.master-keys tr.current td {
+    font-weight: 600;
 }

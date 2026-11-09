@@ -22,8 +22,12 @@ using System.Security.Cryptography;
 
 using Newtonsoft.Json.Linq;
 
+using org.GraphDefined.Vanaheimr.Illias;
+
 using org.GraphDefined.Vanaheimr.Hermod;
 using org.GraphDefined.Vanaheimr.Hermod.DNS;
+using org.GraphDefined.Vanaheimr.Hermod.HTTP;
+using org.GraphDefined.Vanaheimr.Hermod.Mail;
 using org.GraphDefined.Vanaheimr.Hermod.SSH;
 using org.GraphDefined.Vanaheimr.Hermod.SSH.Client;
 using org.GraphDefined.Vanaheimr.Norn.NTS;
@@ -591,6 +595,13 @@ namespace cloud.charging.open.NTSServer.Tests
             var cs001             = (JObject) clients.First(entry => entry["name"]!.Value<String>() == "cs001")["activity"]!;
             var cs002             = (JObject) clients.First(entry => entry["name"]!.Value<String>() == "cs002")["activity"]!;
 
+            // The NTS clients page reads the same beside each client, and no account made a key exchange.
+            var shown             = node.SSHJSON();
+
+            Assert.That(JToken.DeepEquals(shown["clients"]!.First(entry => entry["name"]!.Value<String>() == "cs001")["activity"], cs001), Is.True,
+                        "the NTS clients page and the status say the key exchanges of cs001 differently");
+            Assert.That((JArray) shown["accounts"]!, Is.Empty);
+
             Assert.Multiple(() => {
 
                 Assert.That(cs001["served"]!.Value<Int64>(),                     Is.EqualTo(2));
@@ -710,6 +721,137 @@ namespace cloud.charging.open.NTSServer.Tests
                                                               Timeout:       TimeSpan.FromSeconds(3));
 
             Assert.That(refused.Success, Is.False, "a cookie of a forgotten master key was answered");
+
+        }
+
+        #endregion
+
+        #region (private static) AccountWithPassword(Node, Name, Role)
+
+        /// <summary>
+        /// An account of the node's organization in the group of the given role,
+        /// with a password of its own - and an HTTP client signed in as it with
+        /// HTTP Basic Auth, as the JSON API takes it.
+        /// </summary>
+        private static async Task<HttpClient> AccountWithPassword(NTSServerNode  Node,
+                                                                  String         Name,
+                                                                  String         Role)
+        {
+
+            var password = "A-Test-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
+
+            Assert.That(Node.ExtAPI.TryGetOrganization(Organization_Id.Parse(Node.Kind.Organization), out var organization) &&
+                        organization is Organization, Is.True, "the node's organization is not there");
+
+            await Node.ExtAPI.CreateUser(User_Id.Parse(Name),
+                                         I18NString.Create(Languages.en, Name),
+                                         SimpleEMailAddress.Parse($"{Name}@localhost"),
+                                         User2OrganizationEdgeLabel.IsMember,
+                                         (Organization) organization!,
+                                         Password:                  password,
+                                         SkipDefaultNotifications:  true,
+                                         SkipNewUserEMail:          true,
+                                         SkipNewUserNotifications:  true,
+                                         AcceptedEULA:              DateTimeOffset.UtcNow.AddSeconds(-1),
+                                         IsAuthenticated:           true);
+
+            Assert.That(Node.ExtAPI.TryGetUser     (User_Id.     Parse(Name), out var user),  Is.True, $"the account '{Name}' was not made");
+            Assert.That(Node.ExtAPI.TryGetUserGroup(UserGroup_Id.Parse(Role), out var group) &&
+                        group is UserGroup, Is.True, $"the node has no group '{Role}'");
+
+            await Node.ExtAPI.AddUserToUserGroup((User) user!,
+                                                 User2UserGroupEdgeLabel.IsMember,
+                                                 (UserGroup) group!);
+
+            var http = new HttpClient();
+
+            http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                                                           "Basic",
+                                                           Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{Name}:{password}"))
+                                                       );
+
+            return http;
+
+        }
+
+        #endregion
+
+        #region TheMasterKey_IsRotatedOverTheJSONAPI()
+
+        /// <summary>
+        /// The web interface's "New master key" and "New key, and forget the
+        /// others": POST v1/ntsServer/masterKeys/rotate, for whoever may change
+        /// the time server - answered with the new key and the keys kept, never
+        /// a value.
+        /// </summary>
+        [Test]
+        public async Task TheMasterKey_IsRotatedOverTheJSONAPI()
+        {
+
+            var node     = await Started();
+            var before   = node.Host.CurrentMasterKeyId!.Value;
+            var url      = $"{node.APIURL}v1/ntsServer/masterKeys/rotate";
+
+            using var anybody  = new HttpClient();
+            using var admin    = new HttpClient();
+
+            admin.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                                                            "Basic",
+                                                            Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{WWCPNode.DefaultAdminUser}:{node.GeneratedPassword}"))
+                                                        );
+
+            static StringContent JSON(String Text) => new (Text, System.Text.Encoding.UTF8, "application/json");
+
+            // Nobody signed in: nothing rotated.
+            var refused  = await anybody.PostAsync(url, JSON("{}"));
+
+            Assert.That((Int32) refused.StatusCode,   Is.EqualTo(401));
+            Assert.That(node.Host.CurrentMasterKeyId, Is.EqualTo(before));
+
+            // An operator, who may read the time server but not change it: nothing rotated.
+            using var operatorHTTP = await AccountWithPassword(node, "operator1", NTSServerAccess.Operator.Name);
+
+            var reader   = await operatorHTTP.PostAsync(url, JSON("{}"));
+
+            Assert.That((Int32) reader.StatusCode,    Is.EqualTo(403), await reader.Content.ReadAsStringAsync());
+            Assert.That(node.Host.CurrentMasterKeyId, Is.EqualTo(before));
+
+            // "forget" that is no true or false: nothing rotated.
+            var bad      = await admin.PostAsync(url, JSON("""{ "forget": "yes" }"""));
+
+            Assert.That((Int32) bad.StatusCode,       Is.EqualTo(400));
+            Assert.That(node.Host.CurrentMasterKeyId, Is.EqualTo(before));
+
+            // A new key that keeps the others.
+            var kept     = await admin.PostAsync(url, JSON("""{ "forget": false }"""));
+            var keptJSON = JObject.Parse(await kept.Content.ReadAsStringAsync());
+
+            Assert.That((Int32) kept.StatusCode, Is.EqualTo(200), keptJSON.ToString());
+            Assert.Multiple(() => {
+                Assert.That(keptJSON["rotated"]!["id"]!.Value<UInt64>(),       Is.EqualTo(node.Host.CurrentMasterKeyId));
+                Assert.That(keptJSON["rotated"]!["current"]!.Value<Boolean>(), Is.True);
+                Assert.That(keptJSON["forgotten"]!.Value<Boolean>(),           Is.False);
+                Assert.That(((JArray) keptJSON["masterKeys"]!).Select(key => key["id"]!.Value<UInt64>()),
+                            Is.EqualTo(new[] { before, node.Host.CurrentMasterKeyId!.Value }));
+                Assert.That(keptJSON.ToString(), Does.Not.Contain("value"), "a master key's value went out");
+            });
+
+            // Without a body, as the same; then one that forgets the others.
+            var plain    = await admin.PostAsync(url, null);
+
+            Assert.That((Int32) plain.StatusCode, Is.EqualTo(200));
+            Assert.That(node.Host.MasterKeys,     Has.Count.EqualTo(3));
+
+            var forgot   = await admin.PostAsync(url, JSON("""{ "forget": true }"""));
+            var forgotJSON = JObject.Parse(await forgot.Content.ReadAsStringAsync());
+
+            Assert.That((Int32) forgot.StatusCode, Is.EqualTo(200), forgotJSON.ToString());
+            Assert.Multiple(() => {
+                Assert.That(forgotJSON["forgotten"]!.Value<Boolean>(), Is.True);
+                Assert.That(((JArray) forgotJSON["masterKeys"]!).Select(key => key["id"]!.Value<UInt64>()),
+                            Is.EqualTo(new[] { node.Host.CurrentMasterKeyId!.Value }));
+                Assert.That(node.Host.MasterKeys, Has.Count.EqualTo(1));
+            });
 
         }
 
