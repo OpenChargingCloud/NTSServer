@@ -697,11 +697,28 @@ namespace cloud.charging.open.NTSServer
                            new JProperty("url",           SSHURL),
                            new JProperty("hostKey",       SSHHostKey),
                            new JProperty("clients",       new JArray(SSHClients.Clients.Select(client => new JObject(
-                                                              new JProperty("name",     client.Name),
-                                                              new JProperty("enabled",  client.Enabled),
-                                                              new JProperty("keys",     client.Keys.Count)
-                                                          ))))
+                                                              new JProperty("name",      client.Name),
+                                                              new JProperty("enabled",   client.Enabled),
+                                                              new JProperty("keys",      client.Keys.Count),
+                                                              new JProperty("activity",  Host.SSHActivity.TryGetValue(client.Name, out var activity)
+                                                                                             ? activity.ToJSON()
+                                                                                             : NTSClientActivity.None.ToJSON())
+                                                          )))),
+                           // Accounts allowed to run "ntske" that made key exchanges.
+                           new JProperty("accounts",      new JArray(Host.SSHActivity.
+                                                                         Where  (activity => !SSHClients.Knows(activity.Key)).
+                                                                         OrderBy(activity => activity.Key, StringComparer.OrdinalIgnoreCase).
+                                                                         Select (activity => new JObject(
+                                                                                                 new JProperty("name",      activity.Key),
+                                                                                                 new JProperty("activity",  activity.Value.ToJSON())
+                                                                                             ))))
                        )),
+                       new JProperty("masterKeys",    new JArray(Host.MasterKeys.Select(key => new JObject(
+                                                          new JProperty("id",         key.Id),
+                                                          new JProperty("notBefore",  key.NotBefore.ToString("o")),
+                                                          new JProperty("notAfter",   key.NotAfter. ToString("o")),
+                                                          new JProperty("current",    key.IsCurrent)
+                                                      )))),
                        new JProperty("clock",         new JObject(
                            new JProperty("now",           now.ToString("o")),
                            new JProperty("base",          Clock.IsFreeRunning ? "free-running" : "system"),
@@ -759,7 +776,9 @@ namespace cloud.charging.open.NTSServer
                        new JProperty("fingerprint",  key.PublicKey.Sha256Fingerprint),
                        new JProperty("comment",      key.PublicKey.Comment.Length > 0 ? key.PublicKey.Comment : null),
                        new JProperty("notAfter",     key.NotAfter?.ToString("o")),
-                       new JProperty("options",      new JArray(key.Options))
+                       new JProperty("options",      new JArray(key.Options)),
+                       new JProperty("certAuthority",  key.IsCertAuthority),
+                       new JProperty("principals",     key.Principals.Count > 0 ? new JArray(key.Principals) : null)
                    );
 
         }

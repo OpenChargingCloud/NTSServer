@@ -819,7 +819,9 @@ namespace cloud.charging.open.NTSServer
             => protocols.WWCP.Node.SecureShell.AuthorizedKeysStore.IsAccountName(Name);
 
         /// <summary>
-        /// Whether the line is one authorized_keys line Hermod can hold a key to.
+        /// Whether the line is one authorized_keys line Hermod can hold a key to:
+        /// a client's own key, or with cert-authority the key of an SSH CA whose
+        /// user certificates let the client in.
         /// </summary>
         public static Boolean IsAuthorizedKeyLine(String                            Line,
                                                   [NotNullWhen(false)] out String?  Why)
@@ -834,12 +836,6 @@ namespace cloud.charging.open.NTSServer
             if (!org.GraphDefined.Vanaheimr.Hermod.SSH.AuthorizedKeysFile.TryParseLine(Line, out var entry) || entry is null)
             {
                 Why = $"'{(Line.Length > 40 ? Line[..40] + "..." : Line)}' could not be read as one.";
-                return false;
-            }
-
-            if (entry.IsCertAuthority)
-            {
-                Why = "a cert-authority line is not taken here: an NTS client is let in by its own key.";
                 return false;
             }
 

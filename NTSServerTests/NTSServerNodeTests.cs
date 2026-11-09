@@ -500,6 +500,217 @@ namespace cloud.charging.open.NTSServer.Tests
 
         #endregion
 
+        #region (private static) Certificate(CA, Key, Principals, ValidAfter, ValidBefore)
+
+        /// <summary>
+        /// A user certificate of the given CA for the given key, as ssh-keygen -s
+        /// signs one, with the extensions OpenSSH gives a user certificate.
+        /// </summary>
+        private static CertifiedKey Certificate(ISshHostKey      CA,
+                                                ISshHostKey      Key,
+                                                String[]         Principals,
+                                                DateTimeOffset?  ValidAfter   = null,
+                                                DateTimeOffset?  ValidBefore  = null)
+        {
+
+            var builder = new OpenSshCertificateBuilder {
+                              Serial       = 42,
+                              Type         = SshCertType.User,
+                              KeyId        = "charging station",
+                              Principals   = [ .. Principals ],
+                              ValidAfter   = ValidAfter  ?? DateTimeOffset.UtcNow.AddDays(-1),
+                              ValidBefore  = ValidBefore ?? DateTimeOffset.UtcNow.AddDays(1)
+                          };
+
+            foreach (var extension in OpenSshCertificateBuilder.DefaultUserExtensions)
+                builder.Extensions.Add(new KeyValuePair<String, Byte[]>(extension.Key, []));
+
+            return new CertifiedKey(Key, builder.Sign(Key.PublicKeyBlob, CA));
+
+        }
+
+        #endregion
+
+        #region (private static) WithinASecond(Condition)
+
+        /// <summary>
+        /// The server tells after the answer went out: give it the moment it may take.
+        /// </summary>
+        private static async Task<Boolean> WithinASecond(Func<Boolean> Condition)
+        {
+
+            for (var i = 0; i < 50; i++)
+            {
+                if (Condition())
+                    return true;
+                await Task.Delay(20);
+            }
+
+            return Condition();
+
+        }
+
+        #endregion
+
+
+        #region EveryNTSClient_IsShownWithItsLastKeyExchange()
+
+        /// <summary>
+        /// Section 8.2 of the white paper: which clients were served, how and when
+        /// last, and how many cookies went out - in the status the command line and
+        /// the web interface read.
+        /// </summary>
+        [Test]
+        public async Task EveryNTSClient_IsShownWithItsLastKeyExchange()
+        {
+
+            var node   = await Started();
+            var key    = SshHostKey.GenerateEd25519();
+
+            Assert.That(node.TrySetSSHClients([ new NTSClientEntry("cs001", [ SshPublicKey.FromHostKey(key, "cs001").ToAuthorizedKeyLine() ]),
+                                                new NTSClientEntry("cs002", [ SshPublicKey.FromHostKey(SshHostKey.GenerateEd25519()).ToAuthorizedKeyLine() ]) ], out var error),
+                        Is.True, error);
+
+            await using var ssh   = await ConnectOverSSH(node, "cs001", key);
+
+            var client            = ClientOf(node);
+            var first             = await client.GetNTSKERecordsOverSSH(ssh);
+            var second            = await client.GetNTSKERecordsOverSSH(ssh);
+
+            Assert.That(first. Success, Is.True, first. ErrorMessage?.ToString());
+            Assert.That(second.Success, Is.True, second.ErrorMessage?.ToString());
+
+            Assert.That(await WithinASecond(() => node.Host.SSHActivity.TryGetValue("cs001", out var seen) && seen.Served == 2), Is.True,
+                        "the key exchanges of cs001 were not counted");
+
+            var clients           = (JArray) node.StatusJSON()["ssh"]!["clients"]!;
+            var cs001             = (JObject) clients.First(entry => entry["name"]!.Value<String>() == "cs001")["activity"]!;
+            var cs002             = (JObject) clients.First(entry => entry["name"]!.Value<String>() == "cs002")["activity"]!;
+
+            Assert.Multiple(() => {
+
+                Assert.That(cs001["served"]!.Value<Int64>(),                     Is.EqualTo(2));
+                Assert.That(cs001["refused"]!.Value<Int64>(),                    Is.Zero);
+                Assert.That(cs001["cookies"]!.Value<Int64>(),                    Is.EqualTo(2 * org.GraphDefined.Vanaheimr.Norn.NTS.NTSServer.MaxCookiesPerResponse));
+                Assert.That(cs001["lastServed"]!["method"]!.Value<String>(),     Is.EqualTo("exporter"));
+                Assert.That(cs001["lastServed"]!["from"]!.Value<String>(),       Does.StartWith("127.0.0.1"));
+                Assert.That(cs001["lastServed"]!["aeadAlgorithm"]!.Value<Int32>(), Is.EqualTo((Int32) first.Response!.AEADAlgorithm));
+
+                Assert.That(cs002["served"]!.Value<Int64>(),                     Is.Zero);
+                Assert.That(cs002["lastServed"]!.Type,                           Is.EqualTo(JTokenType.Null));
+
+            });
+
+        }
+
+        #endregion
+
+        #region ACertificateOfTheClientsCA_LetsItIn()
+
+        /// <summary>
+        /// Section 8.2 of the white paper: an NTS client let in by the user
+        /// certificates of an SSH CA, as OpenSSH's cert-authority line has it -
+        /// for its own name, or for a name principals="..." gives.
+        /// </summary>
+        [Test]
+        public async Task ACertificateOfTheClientsCA_LetsItIn()
+        {
+
+            var node   = await Started();
+            var ca     = SshHostKey.GenerateEd25519();
+            var other  = SshHostKey.GenerateEd25519();
+            var key    = SshHostKey.GenerateEd25519();
+            var caLine = "cert-authority " + SshPublicKey.FromHostKey(ca, "station CA").ToAuthorizedKeyLine();
+
+            Assert.That(node.TrySetSSHClients([ new NTSClientEntry("cs001", [ caLine ]),
+                                                new NTSClientEntry("cs003", [ "cert-authority,principals=\"station-3\" " + SshPublicKey.FromHostKey(ca).ToAuthorizedKeyLine() ]) ],
+                                              out var error),
+                        Is.True, error);
+
+            // For its own name: let in, and served.
+            await using (var ssh = await ConnectOverSSH(node, "cs001", Certificate(ca, key, [ "cs001" ])))
+            {
+                var keyExchange = await ClientOf(node).GetNTSKERecordsOverSSH(ssh);
+                Assert.That(keyExchange.Success, Is.True, keyExchange.ErrorMessage?.ToString());
+            }
+
+            // For the name principals="..." gives, under another login name.
+            await using (var ssh = await ConnectOverSSH(node, "cs003", Certificate(ca, key, [ "station-3" ])))
+            {
+                var keyExchange = await ClientOf(node).GetNTSKERecordsOverSSH(ssh);
+                Assert.That(keyExchange.Success, Is.True, keyExchange.ErrorMessage?.ToString());
+            }
+
+            Assert.Multiple(() => {
+
+                // For another client, of another CA, run out, or not yet valid: turned away.
+                Assert.That(async () => await ConnectOverSSH(node, "cs001", Certificate(ca,    key, [ "cs002" ])),                         Throws.Exception, "for another name");
+                Assert.That(async () => await ConnectOverSSH(node, "cs001", Certificate(other, key, [ "cs001" ])),                         Throws.Exception, "of another CA");
+                Assert.That(async () => await ConnectOverSSH(node, "cs001", Certificate(ca,    key, [ "cs001" ],
+                                                                                         ValidAfter:  DateTimeOffset.UtcNow.AddDays(-2),
+                                                                                         ValidBefore: DateTimeOffset.UtcNow.AddDays(-1))),       Throws.Exception, "run out");
+                Assert.That(async () => await ConnectOverSSH(node, "cs003", Certificate(ca,    key, [ "cs003" ])),                         Throws.Exception, "the login name where principals= names another");
+
+                // The CA's key itself is no key to sign in with.
+                Assert.That(async () => await ConnectOverSSH(node, "cs001", ca),                                                           Throws.Exception, "the CA's own key");
+
+            });
+
+            var shown = (JObject) node.SSHJSON()["clients"]![0]!["keys"]![0]!;
+
+            Assert.That(shown["certAuthority"]!.Value<Boolean>(), Is.True);
+
+        }
+
+        #endregion
+
+        #region TheMasterKey_IsRotated_AndForgotten()
+
+        /// <summary>
+        /// Section 8.2 of the white paper: the cookie master key rotated by an
+        /// administrator - the cookies a client holds still answered - and, for
+        /// a key that may have been read, the earlier keys forgotten at once.
+        /// </summary>
+        [Test]
+        public async Task TheMasterKey_IsRotated_AndForgotten()
+        {
+
+            var node         = await Started();
+            var client       = ClientOf(node);
+            var keyExchange  = await client.GetNTSKERecords();
+
+            Assert.That(keyExchange.Success, Is.True, keyExchange.ErrorMessage?.ToString());
+
+            var before       = node.Host.CurrentMasterKeyId;
+            var rotated      = node.Host.RotateMasterKey();
+
+            Assert.That(rotated,           Is.Not.Null);
+            Assert.That(rotated!.Id,       Is.GreaterThan(before!.Value));
+            Assert.That(node.Host.CurrentMasterKeyId, Is.EqualTo(rotated.Id));
+
+            var keys         = (JArray) node.StatusJSON()["masterKeys"]!;
+
+            Assert.That(keys.Select(key => (key["id"]!.Value<UInt64>(), key["current"]!.Value<Boolean>())),
+                        Is.EqualTo(new[] { (before.Value, false), (rotated.Id, true) }));
+
+            var answered     = await client.QueryTime(NTSKEResponse: keyExchange.Response,
+                                                      Timeout:       TimeSpan.FromSeconds(10));
+
+            Assert.That(answered.Success, Is.True, answered.ErrorMessage);
+
+            node.Host.RotateMasterKey(ForgetTheOthers: true);
+
+            Assert.That(node.Host.MasterKeys, Has.Count.EqualTo(1));
+
+            var refused      = await ClientOf(node).QueryTime(NTSKEResponse: keyExchange.Response,
+                                                              Timeout:       TimeSpan.FromSeconds(3));
+
+            Assert.That(refused.Success, Is.False, "a cookie of a forgotten master key was answered");
+
+        }
+
+        #endregion
+
         #region TheStatusIsNobodysBusinessWithoutASignIn()
 
         [Test]

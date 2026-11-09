@@ -47,6 +47,15 @@ namespace cloud.charging.open.NTSServer.SecureShell
     /// expiry-time="20271231" in front of it hold.
     /// </para>
     /// <para>
+    /// <b>Or the certificates of an SSH CA.</b> A line with cert-authority is
+    /// the key of a CA (section 8.2 of the white paper "NTS Key Establishment
+    /// over SSH"): a user certificate it signed lets the client in where it is
+    /// valid and names the client - or, with principals="..." on the line, one
+    /// of the names there. What the certificate confines a session to holds as
+    /// well, source-address above all, and a certificate that runs out ends the
+    /// session at the next check.
+    /// </para>
+    /// <para>
     /// <b>Asked again while a session lasts.</b> A client taken out of the
     /// section, switched off or left without the key it came with has its
     /// session ended - at the next of the node's checks, every few seconds.
@@ -150,7 +159,7 @@ namespace cloud.charging.open.NTSServer.SecureShell
                 var keys = new List<AuthorizedKey>();
 
                 foreach (var line in client.Keys)
-                    if (AuthorizedKeysFile.TryParseLine(line, out var key) && key is not null && !key.IsCertAuthority)
+                    if (AuthorizedKeysFile.TryParseLine(line, out var key) && key is not null)
                         keys.Add(key);
 
                 parsed[client.Name] = (client, keys);
@@ -238,6 +247,10 @@ namespace cloud.charging.open.NTSServer.SecureShell
 
         #region (private) FindKey(Name, PublicKeyBlob)
 
+        /// <summary>
+        /// The line that lets the given key in under the given name: the client's
+        /// own key, or for a certificate the CA that signed it for the client.
+        /// </summary>
         private AuthorizedKey? FindKey(String  Name,
                                        Byte[]  PublicKeyBlob)
         {
@@ -247,7 +260,40 @@ namespace cloud.charging.open.NTSServer.SecureShell
 
             var now = timeProvider.GetUtcNow();
 
-            return client.Keys.FirstOrDefault(key => key.Matches(PublicKeyBlob) && key.IsValidAt(now));
+            if (SshCertificate.TryParse(PublicKeyBlob, out var certificate) && certificate is not null)
+                return client.Keys.FirstOrDefault(key => key.IsCertAuthority                    &&
+                                                         key.IsValidAt(now)                     &&
+                                                         key.Matches(certificate.SignatureKey) &&
+                                                         IsCertifiedFor(certificate, key, Name, now));
+
+            return client.Keys.FirstOrDefault(key => !key.IsCertAuthority && key.Matches(PublicKeyBlob) && key.IsValidAt(now));
+
+        }
+
+        #endregion
+
+        #region (private static) IsCertifiedFor(Certificate, Authority, Name, Now)
+
+        /// <summary>
+        /// Whether the certificate is a valid user certificate of the CA for the
+        /// client: for its name, or with principals="..." on the CA's line for
+        /// one of the names there - as OpenSSH reads such a line.
+        /// </summary>
+        private static Boolean IsCertifiedFor(SshCertificate  Certificate,
+                                              AuthorizedKey   Authority,
+                                              String          Name,
+                                              DateTimeOffset  Now)
+        {
+
+            var trust = new SshCertificateAuthorityTrust().TrustCA(Certificate.SignatureKey);
+
+            return (Authority.Principals.Count > 0 ? Authority.Principals : [ Name ]).
+                       Any(principal => SshCertificateValidator.Validate(Certificate,
+                                                                         SshCertType.User,
+                                                                         principal,
+                                                                         trust,
+                                                                         Now,
+                                                                         SshSessionRestrictions.EnforcedCriticalOptions).IsValid);
 
         }
 
@@ -269,7 +315,9 @@ namespace cloud.charging.open.NTSServer.SecureShell
             // An unknown key is a stranger's, and not worth more than the SSH
             // server's own line.
             if (FindKey(Name, PublicKeyBlob) is null)
-                return $"the key {SshFingerprint.Sha256(PublicKeyBlob)} is not one the NTS client '{Name}' signs in with - taken out, or expired";
+                return SshCertificate.TryParse(PublicKeyBlob, out var certificate) && certificate is not null
+                           ? $"the certificate '{certificate.KeyId}' (serial {certificate.Serial}) is not signed for the NTS client '{Name}' by a CA it trusts - taken out, run out, or for another name"
+                           : $"the key {SshFingerprint.Sha256(PublicKeyBlob)} is not one the NTS client '{Name}' signs in with - taken out, or expired";
 
             if (!client.Entry.Enabled)
             {

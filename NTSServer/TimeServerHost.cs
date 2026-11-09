@@ -17,6 +17,7 @@
 
 #region Usings
 
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 
@@ -31,6 +32,8 @@ using org.GraphDefined.Vanaheimr.Norn.NTS;
 
 using cloud.charging.open.protocols.WWCP.Node;
 using cloud.charging.open.protocols.WWCP.Node.Logging;
+
+using cloud.charging.open.NTSServer.SecureShell;
 
 using NornNTSServer = org.GraphDefined.Vanaheimr.Norn.NTS.NTSServer;
 
@@ -91,6 +94,8 @@ namespace cloud.charging.open.NTSServer
         private volatile NornNTSServer?           server;
         private          NTSServerMetrics         earlier       = new (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         private          CancellationTokenSource? retry;
+
+        private readonly ConcurrentDictionary<String, NTSClientActivity>  sshActivity  = new (StringComparer.Ordinal);
 
         #endregion
 
@@ -156,6 +161,21 @@ namespace cloud.charging.open.NTSServer
         /// </summary>
         public UInt64?             CurrentMasterKeyId
             => server?.CurrentMasterKeyId;
+
+        /// <summary>
+        /// The master keys of the cookies, oldest first - their ids and when
+        /// they are valid, never their values -, or none while nothing runs.
+        /// </summary>
+        public IReadOnlyList<MasterKeyInfo>  MasterKeys
+            => server?.MasterKeys ?? [];
+
+        /// <summary>
+        /// What each login made of NTS-KE over SSH since this program started,
+        /// by its name - over every server made since, not only the one running
+        /// now.
+        /// </summary>
+        public IReadOnlyDictionary<String, NTSClientActivity>  SSHActivity
+            => sshActivity;
 
         #endregion
 
@@ -403,6 +423,21 @@ namespace cloud.charging.open.NTSServer
         #endregion
 
 
+        #region RotateMasterKey(ForgetTheOthers = false)
+
+        /// <summary>
+        /// Seal the cookies with a new master key from now on: the earlier keys
+        /// still open theirs until their grace period is over - or, with
+        /// <paramref name="ForgetTheOthers"/>, never again, for a key that may
+        /// have been read. Kept in the key file, so that the next server made
+        /// takes the new key up. Null while nothing runs.
+        /// </summary>
+        public MasterKeyInfo? RotateMasterKey(Boolean ForgetTheOthers = false)
+
+            => server?.RotateMasterKey(ForgetTheOthers);
+
+        #endregion
+
         #region ServeSSHSubsystemAsync(Context, CancellationToken)
 
         /// <summary>
@@ -522,12 +557,16 @@ namespace cloud.charging.open.NTSServer
                            TimeProvider:                  Clock
                        );
 
+            made.OnSSHKeyExchange += Remember;
+
             try
             {
                 await made.Start();
             }
             catch (Exception e)
             {
+
+                made.OnSSHKeyExchange -= Remember;
 
                 try { await made.ShutdownAsync(); } catch { }
 
@@ -553,6 +592,34 @@ namespace cloud.charging.open.NTSServer
 
         #endregion
 
+        #region (private) Remember(Exchange)
+
+        /// <summary>
+        /// A key exchange over SSH, for the status of its login and for the log.
+        /// </summary>
+        private void Remember(NTSKEOverSSHExchange Exchange)
+        {
+
+            var name = Exchange.Session.Username;
+
+            sshActivity.AddOrUpdate(name,
+                                    _        => NTSClientActivity.None.With(Exchange),
+                                    (_, was) => was.With(Exchange));
+
+            if (Exchange.Succeeded)
+                log.Info  ($"NTS-KE over SSH: '{name}' from {Exchange.Session.Peer?.ToString() ?? "a tunnel"} got {Exchange.Cookies} cookie(s), " +
+                           $"its keys from {NTSClientActivity.TextOf(Exchange.Method)}" +
+                           (Exchange.AEADAlgorithm is AEADAlgorithms algorithm ? $", for {algorithm}" : "") + ".",
+                           "ntsserver", "ssh");
+
+            else
+                log.Notice($"NTS-KE over SSH: '{name}' from {Exchange.Session.Peer?.ToString() ?? "a tunnel"} got no cookies: {Exchange.Problem}.",
+                           "ntsserver", "ssh");
+
+        }
+
+        #endregion
+
         #region (private) ShutdownCurrent()
 
         private async Task ShutdownCurrent()
@@ -563,6 +630,8 @@ namespace cloud.charging.open.NTSServer
 
             server  = null;
             earlier = Add(earlier, current.Metrics);
+
+            current.OnSSHKeyExchange -= Remember;
 
             try
             {
