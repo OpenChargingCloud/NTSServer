@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>cloud.charging.open.NTSServer.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="NUnit" Version="5.0.0" />
+    <PackageReference Include="NUnit.Analyzers" Version="4.15.0" PrivateAssets="all" />
+    <PackageReference Include="NUnit3TestAdapter" Version="6.3.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="NUnit.Framework" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NTSServer\NTSServer.csproj" />
+    <ProjectReference Include="..\..\WWCP_Node\WWCP_Node_TestKit\WWCP_Node_TestKit.csproj" />
+  </ItemGroup>
+
+</Project>

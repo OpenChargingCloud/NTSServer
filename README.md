@@ -1,1 +1,38 @@
-# NTS Server
+# NTSServer
+
+The time server of the OpenChargingCloud: a
+[WWCP_Node](https://github.com/OpenChargingCloud/WWCP_Node) that hands out
+time over NTS - NTS-KE over TLS 1.3 (RFC 8915) and over SSH (the subsystem
+`ntske/1@open.charging.cloud`), and NTP and NTP+NTS - with a JSON API below
+`/api/v1/ntsServer`. The time is either the clock of the machine it runs on,
+or the time of a group of upstream NTS servers it follows, without ever
+setting the machine's clock. The protocols themselves - NTS-KE, NTP, the
+cookies, the AEAD - are [Norn](https://github.com/Vanaheimr/Norn)'s.
+
+It is not built alone:
+[NTSServerCLI](https://github.com/OpenChargingCloud/NTSServerCLI) pins it
+beside the libraries it needs, builds it, and runs its tests. Its README says
+how the server is configured and run.
+
+| | |
+|---|---|
+| `NTSServer/NTSServerNode.cs` | the node: its names, its port (2361), its certificate listeners, and what it is made of |
+| `NTSServer/NTSServerAccess.cs` | the resources `timeserver` and `ntske`, and the roles `operator` and `ntsclient` |
+| `NTSServer/Settings/` | the `ntsServer` section of the configuration |
+| `NTSServer/Clock/` | the clock handed out - the machine's, or a free-running one slewed to the upstream servers - and what the answers say of it |
+| `NTSServer/TimeServerHost.cs` | Norn's NTS server, made anew where that description changes, with the master keys of the cookies in a file |
+| `NTSServer/NTSKETLSIdentity.cs` | the certificate NTS-KE over TLS shows: a TLS server identity of the store, or a self-signed one |
+| `NTSServer/SecureShell/` | the machines let in for NTS-KE over SSH, by their SSH keys |
+| `NTSServer/HTTPAPI/` | the routes below `v1/ntsServer` |
+| `NTSServerTests/` | the settings and the clock, the server asked by Norn's own client over TLS and SSH and as the upstream server of another, and WWCP_Node's conformance suite asked of an NTS server |
+
+
+## Your participation
+
+This software is Open Source under the **Affero GPL 3.0 license**.
+We appreciate your participation in this ongoing project, and your help to
+improve it and the e-mobility ICT in general. If you find bugs, want to
+request a feature or send us a pull request, feel free to use the normal
+GitHub features to do so. For this please read the Contributor License
+Agreement carefully and send us a signed copy or use a similar free and
+open license.
