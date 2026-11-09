@@ -37,6 +37,7 @@ namespace cloud.charging.open.NTSServer
     /// <list type="bullet">
     ///   <item>GET  /api/v1/ntsServer             - how the time server stands: what it listens on, where its time comes from, how far that was from the upstream servers, and how much it answered.</item>
     ///   <item>GET  /api/v1/ntsServer/settings    - the "ntsServer" section as it is in effect.</item>
+    ///   <item>PUT  /api/v1/ntsServer/settings    - the section or any part of it but "ssh": in effect at once, and saved - answered with { "settings", "changed", "notes" }.</item>
     ///   <item>POST /api/v1/ntsServer/sync        - ask the upstream servers now, in upstream mode.</item>
     ///   <item>PUT  /api/v1/ntsServer/ssh         - { "enabled", "clients": [ { "name", "keys", "enabled" } ] }: NTS-KE over SSH, and who may use it.</item>
     /// </list>
@@ -80,6 +81,7 @@ namespace cloud.charging.open.NTSServer
 
             AddHandler(root,                GetStatus,    HTTPMethod.GET);
             AddHandler(root + "/settings",  GetSettings,  HTTPMethod.GET);
+            AddHandler(root + "/settings",  PutSettings,  HTTPMethod.PUT);
             AddHandler(root + "/sync",      PostSync,     HTTPMethod.POST);
             AddHandler(root + "/ssh",       GetSSH,       HTTPMethod.GET);
             AddHandler(root + "/ssh",       PutSSH,       HTTPMethod.PUT);
@@ -112,6 +114,38 @@ namespace cloud.charging.open.NTSServer
                 return Task.FromResult(refused);
 
             return Task.FromResult(JSONResponse(Request, HTTPStatusCode.OK, NTSServer.Settings.ToJSON()));
+
+        }
+
+        #endregion
+
+        #region (private) PutSettings(Request)
+
+        /// <summary>
+        /// The time server's own settings, changed: in effect at once, and kept
+        /// in the configuration file - see <see cref="NTSServerNode.ChangeSettingsAsync"/>.
+        /// </summary>
+        private async Task<HTTPResponse> PutSettings(HTTPRequest Request)
+        {
+
+            if (!TryAuthorize(Request, Permission.Edit(NTSServerAccess.TimeServer), true, out var user, out var refused))
+                return refused;
+
+            if (!TryParseJSONObject(Request, out var json, out var badRequest))
+                return badRequest;
+
+            var change = await NTSServer.ChangeSettingsAsync(json, user.Id.ToString());
+
+            if (change.Refused    is String invalid)
+                return ErrorJSON(Request, HTTPStatusCode.BadRequest,          invalid);
+
+            if (change.NotApplied is String notApplied)
+                return ErrorJSON(Request, HTTPStatusCode.Conflict,            $"Nothing was changed: {notApplied}");
+
+            if (change.NotSaved   is String notSaved)
+                return ErrorJSON(Request, HTTPStatusCode.InternalServerError, $"Nothing was changed, since it could not be saved: {notSaved}");
+
+            return JSONResponse(Request, HTTPStatusCode.OK, change.ToJSON());
 
         }
 

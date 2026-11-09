@@ -211,15 +211,17 @@ namespace cloud.charging.open.NTSServer
         private           Byte?                                        announced;
         private           Boolean                                      heldBack;
         private           CancellationTokenSource?                     leapWatch;
+        private           TaskCompletionSource                         nudge      = new (TaskCreationOptions.RunContinuationsAsynchronously);
 
         #endregion
 
         #region Properties
 
         /// <summary>
-        /// How the servers are followed.
+        /// How the servers are followed - read anew by every round, so that a
+        /// change is followed from the next one on (see <see cref="Reconfigure"/>).
         /// </summary>
-        public UpstreamSettings   Settings      { get; }
+        public UpstreamSettings   Settings      { get; private set; }
 
         /// <summary>
         /// What the time handed out is described as while it is synchronized,
@@ -348,18 +350,41 @@ namespace cloud.charging.open.NTSServer
                                    ? Settings.Poll
                                    : TimeSpan.FromTicks(Math.Min(Settings.Poll.Ticks, UpstreamSettings.MinPollInterval.Ticks));
 
-                    try
-                    {
-                        await Task.Delay(wait, token);
-                    }
-                    catch (OperationCanceledException)
-                    {
+                    // Or until the settings change: another group is asked at
+                    // once, and not after up to 17 minutes of the old interval.
+                    await Task.WhenAny(Task.Delay(wait, token), Volatile.Read(ref nudge).Task);
+
+                    if (token.IsCancellationRequested)
                         break;
-                    }
 
                 }
 
             }, token);
+
+        }
+
+        #endregion
+
+        #region Reconfigure(Settings)
+
+        /// <summary>
+        /// Follow the servers as the given settings say from now on - another
+        /// group, another poll interval, step threshold, slew limit or holdover -
+        /// and ask them at once.
+        /// </summary>
+        /// <remarks>
+        /// What was measured is kept: the offsets are offsets of this machine's
+        /// oscillator, whichever group measured them. A group that has another
+        /// time than the one before is found further off than the step threshold,
+        /// and stepped to on the third round, as for any other reason.
+        /// </remarks>
+        public void Reconfigure(UpstreamSettings Settings)
+        {
+
+            this.Settings = Settings;
+
+            Interlocked.Exchange(ref nudge, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).
+                        TrySetResult();
 
         }
 

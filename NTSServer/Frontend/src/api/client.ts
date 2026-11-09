@@ -197,6 +197,61 @@ export interface NTSClientEntry {
     enabled:  boolean;
 }
 
+/** What local mode says of the clock in every answer. */
+export interface LocalClockSettings {
+    stratum:           number;
+    referenceId:       string;
+    /** Null for what is measured with every answer. */
+    rootDispersionMs:  number | null;
+}
+
+/** How upstream mode follows its NTS group. */
+export interface UpstreamSettings {
+    group:            string;
+    pollSeconds:      number;
+    stepThresholdMs:  number;
+    maxSlewPPM:       number;
+    holdoverMinutes:  number;
+}
+
+/** The "ntsServer" section as it is in effect - the switches of this start included. */
+export interface TimeServerSettings {
+    listen:      string;
+    ntsKEPort:   number;
+    ntpPort:     number;
+    hostname:    string | null;
+    ntpServer:   string | null;
+    timeSource:  TimeSource;
+    local:       LocalClockSettings;
+    upstream:    UpstreamSettings;
+    rateLimit:   boolean;
+    ssh:         { enabled: boolean; clients: NTSClientEntry[] };
+}
+
+/**
+ * What a change of the settings sends: any of them but "ssh" - what it
+ * leaves out stays, a null is the default. Only what differs from what is in
+ * effect is changed and saved.
+ */
+export interface TimeServerSettingsChange {
+    listen?:      string | null;
+    ntsKEPort?:   number | null;
+    ntpPort?:     number | null;
+    hostname?:    string | null;
+    ntpServer?:   string | null;
+    timeSource?:  TimeSource;
+    local?:       { [K in keyof LocalClockSettings]?: LocalClockSettings[K] | null };
+    upstream?:    { [K in keyof UpstreamSettings]?:   UpstreamSettings[K]   | null };
+    rateLimit?:   boolean;
+}
+
+/** What a change came to: the settings in effect now, what changed - "ntpPort", "upstream.group" - and what whoever changed it has to know. */
+export interface TimeServerSettingsChanged {
+    settings:  TimeServerSettings;
+    changed:   string[];
+    notes:     string[];
+}
+
 /** What a change of NTS-KE over SSH sends: what it changes, and nothing else. */
 export interface SSHChange {
     enabled?:  boolean;
@@ -218,7 +273,13 @@ export const api = {
 
     ntsServer: {
         status:    ()                   => request<TimeServerStatus>   ('GET',  '/ntsServer'),
-        settings:  ()                   => request<Record<string, unknown>>('GET', '/ntsServer/settings'),
+        settings:     ()                                   => request<TimeServerSettings>       ('GET',  '/ntsServer/settings'),
+        /**
+         * A change of the settings, in effect at once. A time source changed
+         * to upstream waits for nothing: the answer comes before the group has
+         * given a time, and says so.
+         */
+        setSettings:  (change: TimeServerSettingsChange)   => request<TimeServerSettingsChanged>('PUT',  '/ntsServer/settings', change),
         sync:      ()                   => request<UpstreamStatus>     ('POST', '/ntsServer/sync', undefined, roundWithin),
         ssh:       ()                   => request<KeyExchangeOverSSH> ('GET',  '/ntsServer/ssh'),
         setSSH:    (change: SSHChange)  => request<KeyExchangeOverSSH> ('PUT',  '/ntsServer/ssh', change)

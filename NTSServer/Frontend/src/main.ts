@@ -11,11 +11,12 @@ import { nodeMenu, startNode } from '@node/start';
 import { configurationPage } from './pages/configuration';
 import { ntsClientsPage } from './pages/ntsClients';
 import { timeServerPage } from './pages/timeServer';
+import { timeServerSettingsPage } from './pages/timeServerSettings';
 
 // What an NTS server has pages for of its own is the time server - what it
 // hands out, where from, NTS-KE over TLS and what it answered - at
-// "/ntsServer", first in the menu, and below it the machines that may make
-// key exchanges over SSH. Everything else is what every node has: its
+// "/ntsServer", first in the menu, and below it its settings and the
+// machines that may make key exchanges over SSH. Everything else is what every node has: its
 // configuration, name resolution, the time servers it follows, the SSH
 // server, the node's own certificate store and the log - see WWCP_Node's
 // start.ts.
@@ -26,7 +27,8 @@ startNode({
 
     menu: [
         { path: '/ntsServer', label: 'Time server', icon: 'fa-clock', permission: [ 'timeserver:read' ], children: [
-            { path: '/ntsServer/clients', label: 'NTS clients', icon: 'fa-server', permission: [ 'timeserver:read' ] }
+            { path: '/ntsServer/settings', label: 'Settings',    icon: 'fa-sliders', permission: [ 'timeserver:read' ] },
+            { path: '/ntsServer/clients',  label: 'NTS clients', icon: 'fa-server',  permission: [ 'timeserver:read' ] }
         ] },
         nodeMenu.configuration([
             nodeMenu.dns,
@@ -66,8 +68,9 @@ startNode({
     pages: {
 
         '/configuration':      configurationPage,
-        '/ntsServer':          timeServerPage,
-        '/ntsServer/clients':  ntsClientsPage
+        '/ntsServer':           timeServerPage,
+        '/ntsServer/settings':  timeServerSettingsPage,
+        '/ntsServer/clients':   ntsClientsPage
 
     }
 

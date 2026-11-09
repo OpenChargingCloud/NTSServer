@@ -104,7 +104,7 @@ namespace cloud.charging.open.NTSServer
         /// <summary>
         /// What is listened on.
         /// </summary>
-        public TimeServerSettings  Settings      { get; }
+        public TimeServerSettings  Settings      { get; private set; }
 
         /// <summary>
         /// The clock handed out.
@@ -124,7 +124,7 @@ namespace cloud.charging.open.NTSServer
         /// <summary>
         /// The NTP server the key exchange names to its clients, or null for none.
         /// </summary>
-        public URL?                AdvertisedNTP { get; }
+        public URL?                AdvertisedNTP { get; private set; }
 
         /// <summary>
         /// Where the master keys of the cookies are kept, or null for in memory only.
@@ -324,6 +324,75 @@ namespace cloud.charging.open.NTSServer
                 this.Description = Description;
 
                 await StartOrRetry();
+
+            }
+            finally
+            {
+                gate.Release();
+            }
+
+        }
+
+        #endregion
+
+        #region ReconfigureAsync(Settings)
+
+        /// <summary>
+        /// Listen as the given settings say from now on - another address, other
+        /// ports, another NTP server named in the key exchange, rate limiting on
+        /// or off - by a server made anew where one is wanted.
+        /// </summary>
+        /// <remarks>
+        /// Where the new ports cannot be had, everything stays as it was, the
+        /// server that answered among it: a change that would leave nobody
+        /// answering is refused rather than made. Where no server is wanted now -
+        /// upstream mode before its first time - the ports are only tried.
+        /// </remarks>
+        /// <param name="Settings">What is listened on from now on.</param>
+        /// <returns>Null where it took; why not otherwise.</returns>
+        public async Task<String?> ReconfigureAsync(TimeServerSettings Settings)
+        {
+
+            await gate.WaitAsync();
+
+            try
+            {
+
+                var before = this.Settings;
+
+                StopRetrying();
+                await ShutdownCurrent();
+
+                this.Settings       = Settings;
+                this.AdvertisedNTP  = AdvertisedNTPOf(Settings);
+
+                String? problem     = null;
+
+                if (Description is not null)
+                    problem = await TryStart();
+
+                else
+                {
+                    try
+                    {
+                        ProbePorts();
+                    }
+                    catch (PortUnavailableException unavailable)
+                    {
+                        problem = unavailable.Message;
+                    }
+                }
+
+                if (problem is null)
+                    return null;
+
+                this.Settings       = before;
+                this.AdvertisedNTP  = AdvertisedNTPOf(before);
+
+                if (Description is not null)
+                    await StartOrRetry();
+
+                return problem;
 
             }
             finally

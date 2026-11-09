@@ -17,6 +17,9 @@
 
 #region Usings
 
+using System.Net;
+using System.Security.Cryptography;
+
 using Newtonsoft.Json.Linq;
 
 using org.GraphDefined.Vanaheimr.Hermod;
@@ -77,6 +80,66 @@ namespace cloud.charging.open.NTSServer.Tests
                    );
 
         }
+
+
+        #region TheTimeServersSettingsAreChangedOverTheJSONAPI()
+
+        /// <summary>
+        /// The time server's own settings, changed by whoever may edit it:
+        /// answered with what changed - and what is no setting refused.
+        /// </summary>
+        [Test]
+        public async Task TheTimeServersSettingsAreChangedOverTheJSONAPI()
+        {
+
+            using var http          = await SignedIn();
+
+            var (status, answer)    = await Send(http, HttpMethod.Put, "api/v1/ntsServer/settings",
+                                                 new JObject(new JProperty("local", new JObject(new JProperty("stratum", 2)))));
+
+            Assert.That(status,                                                   Is.EqualTo(HttpStatusCode.OK), answer.ToString());
+            Assert.That(answer["changed"]!.Values<String>(),                      Is.EquivalentTo(new[] { "local.stratum" }));
+            Assert.That(answer["settings"]!["local"]!["stratum"]!.Value<Int32>(), Is.EqualTo(2));
+            Assert.That(((NTSServerNode) Node).Host.Description!.Stratum,         Is.EqualTo(2));
+
+            var settings            = await GetJSON(http, "api/v1/ntsServer/settings");
+
+            Assert.That(settings["local"]!["stratum"]!.Value<Int32>(),            Is.EqualTo(2));
+
+            var (refused, why)      = await Send(http, HttpMethod.Put, "api/v1/ntsServer/settings",
+                                                 new JObject(new JProperty("ntpPort", 0)));
+
+            Assert.That(refused,                                                  Is.EqualTo(HttpStatusCode.BadRequest), why.ToString());
+
+        }
+
+        #endregion
+
+        #region AnOperatorMayReadTheTimeServersSettingsButNotChangeThem()
+
+        [Test]
+        public async Task AnOperatorMayReadTheTimeServersSettingsButNotChangeThem()
+        {
+
+            var password            = "An-Operator-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
+
+            await AccountIn("operator1", NTSServerAccess.Operator.Name, password);
+
+            using var http          = await SignedInAs("operator1", password);
+
+            var settings            = await GetJSON(http, "api/v1/ntsServer/settings");
+
+            Assert.That(settings["local"]!["stratum"]!.Value<Int32>(),  Is.EqualTo(1));
+
+            var (status, answer)    = await Send(http, HttpMethod.Put, "api/v1/ntsServer/settings",
+                                                 new JObject(new JProperty("local", new JObject(new JProperty("stratum", 2)))));
+
+            Assert.That(status,                                         Is.EqualTo(HttpStatusCode.Forbidden), answer.ToString());
+            Assert.That(((NTSServerNode) Node).Settings.Local.Stratum,  Is.EqualTo(1));
+
+        }
+
+        #endregion
 
     }
 

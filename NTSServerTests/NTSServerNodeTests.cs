@@ -94,7 +94,8 @@ namespace cloud.charging.open.NTSServer.Tests
         private async Task<NTSServerNode> Started(JObject?  Section        = null,
                                                   JObject?  Configuration  = null,
                                                   Action<NTSServerNode>? BeforeStart = null,
-                                                  ServedClock? Clock       = null)
+                                                  ServedClock? Clock       = null,
+                                                  Func<TimeServerSettings, TimeServerSettings>? CommandLine = null)
         {
 
             var directory = Path.Combine(Path.GetTempPath(), "NTSServerTests-" + Guid.NewGuid().ToString("N")[..12]);
@@ -125,7 +126,8 @@ namespace cloud.charging.open.NTSServer.Tests
                            LogToConsole:      false,
                            BridgeDebugLog:    false,
                            SSH:               new SSHSettings(Enabled: true, Port: IPPort.Parse(TestPorts.Free())),
-                           Clock:             Clock
+                           Clock:             Clock,
+                           CommandLine:       CommandLine
                        );
 
             nodes.Add(node);
@@ -842,7 +844,7 @@ namespace cloud.charging.open.NTSServer.Tests
             var upstream   = await Started(new JObject(new JProperty("local", new JObject(new JProperty("stratum", 1), new JProperty("referenceId", "GPS")))),
                                            Clock: new ServedClock(shifted));
 
-            var downstream = await StartedFollowing(upstream, new ServedClock(shifted));
+            var downstream = await StartedFollowing(upstream, Clock: new ServedClock(shifted));
 
             for (var i = 0; i < 60 && !downstream.Host.IsServing; i++)
                 await Task.Delay(500);
@@ -901,7 +903,7 @@ namespace cloud.charging.open.NTSServer.Tests
 
         #endregion
 
-        #region (private) StartedFollowing(Upstream, Clock = null)
+        #region (private) StartedFollowing(Upstream, TimeSource = "upstream", Clock = null)
 
         /// <summary>
         /// An NTS server in upstream mode following the given one - asked over
@@ -910,6 +912,7 @@ namespace cloud.charging.open.NTSServer.Tests
         /// hold it - every 16 seconds.
         /// </summary>
         private async Task<NTSServerNode> StartedFollowing(NTSServerNode  Upstream,
+                                                           String         TimeSource = "upstream",
                                                            ServedClock?   Clock = null)
         {
 
@@ -935,7 +938,7 @@ namespace cloud.charging.open.NTSServer.Tests
 
             var downstream = await Started(
                                  new JObject(
-                                     new JProperty("timeSource",  "upstream"),
+                                     new JProperty("timeSource",  TimeSource),
                                      new JProperty("upstream",    new JObject(new JProperty("pollSeconds", 16)))
                                  ),
                                  groups,
@@ -996,6 +999,321 @@ namespace cloud.charging.open.NTSServer.Tests
 
             // The key exchange over SSH has nobody to answer either.
             Assert.That(node.NTSKEOverSSH,    Is.True);
+
+        }
+
+        #endregion
+
+
+        #region (private) SectionInFile(Node)
+
+        /// <summary>
+        /// The "ntsServer" section as the configuration file has it now.
+        /// </summary>
+        private static JObject SectionInFile(NTSServerNode Node)
+
+            => (JObject) JObject.Parse(File.ReadAllText(Node.ConfigFile.Path))[TimeServerSettings.SectionName]!;
+
+        #endregion
+
+        #region Settings_OtherPortsAreAnsweredOnAtOnce()
+
+        /// <summary>
+        /// Other ports, while it runs: answered on at once, said to whoever
+        /// changed them, and kept.
+        /// </summary>
+        [Test]
+        public async Task Settings_OtherPortsAreAnsweredOnAtOnce()
+        {
+
+            var node     = await Started();
+            var ntsKE    = TestPorts.Free();
+            var ntp      = UDPPorts.Free();
+
+            var change   = await node.ChangeSettingsAsync(new JObject(new JProperty("ntsKEPort", ntsKE), new JProperty("ntpPort", ntp)), "tester");
+
+            Assert.That(change.IsDone,                     Is.True, change.NotApplied ?? change.Refused ?? change.NotSaved);
+            Assert.That(change.Changed,                    Is.EquivalentTo(new[] { "ntsKEPort", "ntpPort" }));
+            Assert.That(change.Notes,                      Has.Some.Contains($"NTS-KE on TCP {ntsKE}, NTP on UDP {ntp}"));
+            Assert.That(node.Settings.NTSKEPort.ToUInt16(), Is.EqualTo(ntsKE));
+            Assert.That(node.Host.IsServing,               Is.True);
+
+            // Asked on the new ports - ClientOf asks where the settings say.
+            var client      = ClientOf(node);
+            var keyExchange = await client.GetNTSKERecords();
+
+            Assert.That(keyExchange.Success, Is.True, keyExchange.ErrorMessage?.ToString());
+
+            var query       = await client.QueryTime(NTSKEResponse: keyExchange.Response, Timeout: TimeSpan.FromSeconds(10));
+
+            Assert.That(query.Success, Is.True, query.ErrorMessage);
+
+            var section     = SectionInFile(node);
+
+            Assert.That(section["ntsKEPort"]!.Value<Int32>(), Is.EqualTo(ntsKE));
+            Assert.That(section["ntpPort"]!.  Value<Int32>(), Is.EqualTo(ntp));
+
+            // The same again changes nothing.
+            var again       = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpPort", ntp)), "tester");
+
+            Assert.That(again.IsDone,   Is.True);
+            Assert.That(again.Changed,  Is.Empty);
+
+        }
+
+        #endregion
+
+        #region Settings_APortSomebodyElseHasChangesNothing()
+
+        /// <summary>
+        /// A port somebody else has: refused, with the server that answered
+        /// still answering where it did, and nothing written.
+        /// </summary>
+        [Test]
+        public async Task Settings_APortSomebodyElseHasChangesNothing()
+        {
+
+            using var taken = new System.Net.Sockets.UdpClient(new IPEndPoint(System.Net.IPAddress.Loopback, 0));
+            var port        = ((IPEndPoint) taken.Client.LocalEndPoint!).Port;
+
+            var node        = await Started();
+            var before      = node.Settings;
+            var inFile      = SectionInFile(node).ToString();
+
+            var change      = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpPort", port), new JProperty("local", new JObject(new JProperty("stratum", 2)))), "tester");
+
+            Assert.That(change.NotApplied,        Is.Not.Null);
+            Assert.That(change.Changed,           Is.Empty);
+            Assert.That(node.Settings,            Is.SameAs(before));
+            Assert.That(node.Host.IsServing,      Is.True);
+            Assert.That(node.Host.Settings.NTPPort, Is.EqualTo(before.NTPPort));
+            Assert.That(node.Host.Description!.Stratum, Is.EqualTo(1));
+            Assert.That(SectionInFile(node).ToString(), Is.EqualTo(inFile));
+
+            var client      = ClientOf(node);
+            var keyExchange = await client.GetNTSKERecords();
+            var query       = await client.QueryTime(NTSKEResponse: keyExchange.Response, Timeout: TimeSpan.FromSeconds(10));
+
+            Assert.That(query.Success, Is.True, query.ErrorMessage);
+
+        }
+
+        #endregion
+
+        #region Settings_WhatIsNoSettingIsRefused()
+
+        [Test]
+        public async Task Settings_WhatIsNoSettingIsRefused()
+        {
+
+            var node = await Started();
+
+            foreach (var changes in new[] {
+                         new JObject(new JProperty("ntpPort",  "the usual one")),
+                         new JObject(new JProperty("local",    new JObject(new JProperty("stratum", 16)))),
+                         new JObject(new JProperty("local",    new JObject(new JProperty("stratum", "three")))),
+                         new JObject(new JProperty("upstream", new JObject(new JProperty("pollSeconds", 4)))),
+                         new JObject(new JProperty("timeSource", "sundial")),
+                         new JObject(new JProperty("hostname", "not a host name")),
+                         new JObject(new JProperty("anything", 1)),
+                         new JObject(new JProperty("ssh",      new JObject(new JProperty("enabled", false))))
+                     })
+            {
+
+                var change = await node.ChangeSettingsAsync(changes, "tester");
+
+                Assert.That(change.Refused, Is.Not.Null, $"{changes.ToString(Newtonsoft.Json.Formatting.None)} was not refused");
+                Assert.That(change.Changed, Is.Empty);
+
+            }
+
+            Assert.That(node.Settings.SSHEnabled, Is.True);
+
+        }
+
+        #endregion
+
+        #region Settings_WhatLocalModeSaysIsAnsweredAtOnce()
+
+        [Test]
+        public async Task Settings_WhatLocalModeSaysIsAnsweredAtOnce()
+        {
+
+            var node   = await Started();
+
+            var change = await node.ChangeSettingsAsync(new JObject(new JProperty("local", new JObject(new JProperty("stratum", 3), new JProperty("referenceId", "GPS")))), "tester");
+
+            Assert.That(change.IsDone,  Is.True, change.NotApplied ?? change.Refused ?? change.NotSaved);
+            Assert.That(change.Changed, Is.EquivalentTo(new[] { "local.stratum", "local.referenceId" }));
+
+            // Nothing to say of upstream mode, whose settings the file leaves at their defaults.
+            Assert.That(change.Notes,   Is.Empty);
+
+            Assert.That(node.Host.Description!.Stratum,       Is.EqualTo(3));
+            Assert.That(node.Host.Description.ReferenceText,  Is.EqualTo("GPS"));
+
+            var client      = ClientOf(node);
+            var keyExchange = await client.GetNTSKERecords();
+            var query       = await client.QueryTime(NTSKEResponse: keyExchange.Response, Timeout: TimeSpan.FromSeconds(10));
+
+            Assert.That(query.Success,            Is.True, query.ErrorMessage);
+            Assert.That(query.Response!.Stratum,  Is.EqualTo(3));
+
+            var section     = SectionInFile(node);
+
+            Assert.That(section["local"]!["stratum"]!.Value<Int32>(),        Is.EqualTo(3));
+            Assert.That(section["local"]!["referenceId"]!.Value<String>(),   Is.EqualTo("GPS"));
+
+            // A hostname taken away is taken out of the file, so that it reads as none.
+            var cleared     = await node.ChangeSettingsAsync(new JObject(new JProperty("hostname", JValue.CreateNull())), "tester");
+
+            Assert.That(cleared.Changed,          Is.EquivalentTo(new[] { "hostname" }));
+            Assert.That(node.Settings.Hostname,   Is.Null);
+            Assert.That(SectionInFile(node).ContainsKey("hostname"), Is.False);
+
+            // How upstream mode would follow its group is kept, and said to be kept.
+            var kept        = await node.ChangeSettingsAsync(new JObject(new JProperty("upstream", new JObject(new JProperty("pollSeconds", 128)))), "tester");
+
+            Assert.That(kept.Changed,             Is.EquivalentTo(new[] { "upstream.pollSeconds" }));
+            Assert.That(kept.Notes,               Has.Some.Contains("kept for upstream mode"));
+            Assert.That(node.Upstream,            Is.Null);
+
+        }
+
+        #endregion
+
+        #region Settings_ASwitchOfThisStartIsNeverWrittenBack()
+
+        /// <summary>
+        /// A start with a switch that sets the NTP port: a change of something
+        /// else does not write that port into the file, and a change of the
+        /// port itself is in effect, saved, and said to be set otherwise by the
+        /// switch at the next start.
+        /// </summary>
+        [Test]
+        public async Task Settings_ASwitchOfThisStartIsNeverWrittenBack()
+        {
+
+            var switched    = UDPPorts.Free();
+            var node        = await Started(CommandLine: settings => settings with { NTPPort = IPPort.Parse(switched) });
+            var inFile      = SectionInFile(node)["ntpPort"]!.Value<Int32>();
+
+            Assert.That(node.Settings.NTPPort.ToUInt16(), Is.EqualTo(switched));
+            Assert.That(inFile,                           Is.Not.EqualTo(switched));
+
+            var change      = await node.ChangeSettingsAsync(new JObject(new JProperty("rateLimit", true), new JProperty("ntpPort", switched)), "tester");
+
+            Assert.That(change.Changed,                          Is.EquivalentTo(new[] { "rateLimit" }));
+            Assert.That(SectionInFile(node)["ntpPort"]!.Value<Int32>(), Is.EqualTo(inFile));
+            Assert.That(SectionInFile(node)["rateLimit"]!.Value<Boolean>(), Is.True);
+
+            var other       = UDPPorts.Free();
+            var changed     = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpPort", other)), "tester");
+
+            Assert.That(changed.IsDone,                          Is.True, changed.NotApplied);
+            Assert.That(node.Settings.NTPPort.ToUInt16(),        Is.EqualTo(other));
+            Assert.That(SectionInFile(node)["ntpPort"]!.Value<Int32>(), Is.EqualTo(other));
+            Assert.That(changed.Notes,                           Has.Some.Contains("\"ntpPort\" is set otherwise by a switch"));
+
+        }
+
+        #endregion
+
+        #region Settings_AnotherHostnameMakesTheSelfSignedCertificateAnew()
+
+        [Test]
+        public async Task Settings_AnotherHostnameMakesTheSelfSignedCertificateAnew()
+        {
+
+            var node    = await Started();
+            var before  = node.Host.Identity.Fingerprint;
+
+            var change  = await node.ChangeSettingsAsync(new JObject(new JProperty("hostname", "time.example.lan")), "tester");
+
+            Assert.That(change.IsDone,                   Is.True, change.NotApplied ?? change.Refused ?? change.NotSaved);
+            Assert.That(node.Host.Identity.Fingerprint,  Is.Not.EqualTo(before));
+            Assert.That(node.Host.Identity.Names,        Does.Contain("time.example.lan"));
+            Assert.That(change.Notes,                    Has.Some.Contains(node.Host.Identity.Fingerprint));
+            Assert.That(node.Host.IsServing,             Is.True);
+
+            Assert.That(node.StatusJSON()["ntsKE"]!["tls"]!["fingerprint"]!.Value<String>(), Is.EqualTo(node.Host.Identity.Fingerprint));
+
+        }
+
+        #endregion
+
+        #region Settings_FromLocalToUpstreamAndBack()
+
+        /// <summary>
+        /// A server in local mode told to follow another, and back: following
+        /// it on a clock of its own from then on, answering once it has its
+        /// time - and back on this machine's clock, answering at once.
+        /// </summary>
+        [Test]
+        public async Task Settings_FromLocalToUpstreamAndBack()
+        {
+
+            var upstream = await Started(new JObject(new JProperty("local", new JObject(new JProperty("stratum", 1), new JProperty("referenceId", "GPS")))));
+            var node     = await StartedFollowing(upstream, TimeSource: "local");
+
+            Assert.That(node.Upstream,             Is.Null);
+            Assert.That(node.Host.Description!.Stratum, Is.EqualTo(1));
+
+            var change   = await node.ChangeSettingsAsync(new JObject(new JProperty("timeSource", "upstream")), "tester");
+
+            Assert.That(change.IsDone,             Is.True, change.NotApplied ?? change.Refused ?? change.NotSaved);
+            Assert.That(change.Changed,            Is.EquivalentTo(new[] { "timeSource" }));
+            Assert.That(change.Notes,              Has.Some.Contains("Nothing is answered until the NTS group 'legal' has given a time"));
+            Assert.That(node.Upstream,             Is.Not.Null);
+            Assert.That(node.Clock.IsFreeRunning,  Is.True);
+
+            for (var i = 0; i < 60 && !(node.Host.IsServing && node.Host.Description?.Stratum == 2); i++)
+                await Task.Delay(250);
+
+            Assert.That(node.Host.Description?.Stratum, Is.EqualTo(2), $"not following: {node.Upstream!.Status().LastProblem}");
+            Assert.That(node.StatusJSON()["timeSource"]!.Value<String>(), Is.EqualTo("upstream"));
+            Assert.That(SectionInFile(node)["timeSource"]!.Value<String>(), Is.EqualTo("upstream"));
+
+            var back     = await node.ChangeSettingsAsync(new JObject(new JProperty("timeSource", "local")), "tester");
+
+            Assert.That(back.IsDone,               Is.True, back.NotApplied ?? back.Refused ?? back.NotSaved);
+            Assert.That(back.Notes,                Has.Some.Contains("this machine's clock from now on"));
+            Assert.That(node.Upstream,             Is.Null);
+            Assert.That(node.Clock.IsFreeRunning,  Is.False);
+            Assert.That(node.Host.IsServing,       Is.True);
+            Assert.That(node.Host.Description!.Stratum, Is.EqualTo(1));
+
+        }
+
+        #endregion
+
+        #region Settings_AnotherPollIntervalIsFollowedFromTheNextRound()
+
+        [Test]
+        public async Task Settings_AnotherPollIntervalIsFollowedFromTheNextRound()
+        {
+
+            var upstream = await Started();
+            var node     = await StartedFollowing(upstream);
+
+            for (var i = 0; i < 60 && !node.Host.IsServing; i++)
+                await Task.Delay(250);
+
+            var polls    = node.Upstream!.Status().Polls;
+
+            var change   = await node.ChangeSettingsAsync(new JObject(new JProperty("upstream", new JObject(new JProperty("pollSeconds", 20), new JProperty("holdoverMinutes", 5)))), "tester");
+
+            Assert.That(change.IsDone,                                 Is.True, change.NotApplied ?? change.Refused ?? change.NotSaved);
+            Assert.That(change.Changed,                                Is.EquivalentTo(new[] { "upstream.pollSeconds", "upstream.holdoverMinutes" }));
+            Assert.That(node.Upstream!.Settings.Poll,                  Is.EqualTo(TimeSpan.FromSeconds(20)));
+            Assert.That(node.Upstream.Settings.HoldoverTime,           Is.EqualTo(TimeSpan.FromMinutes(5)));
+
+            // Asked at once, rather than after the interval before.
+            for (var i = 0; i < 40 && node.Upstream.Status().Polls == polls; i++)
+                await Task.Delay(250);
+
+            Assert.That(node.Upstream.Status().Polls,                  Is.GreaterThan(polls));
+            Assert.That(SectionInFile(node)["upstream"]!["pollSeconds"]!.Value<Double>(), Is.EqualTo(20));
 
         }
 

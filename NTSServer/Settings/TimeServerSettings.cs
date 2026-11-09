@@ -692,6 +692,57 @@ namespace cloud.charging.open.NTSServer
 
         #endregion
 
+        #region Flat()
+
+        /// <summary>
+        /// Every setting of the section but "ssh", each at its key - "ntpPort",
+        /// "upstream.group" - and with the value the file has for it.
+        /// </summary>
+        public IReadOnlyDictionary<String, JToken> Flat()
+        {
+
+            var flat = new Dictionary<String, JToken>();
+
+            foreach (var property in ToJSON().Properties())
+            {
+
+                if (property.Name == "ssh")
+                    continue;
+
+                if (property.Value is JObject inner)
+                    foreach (var innerProperty in inner.Properties())
+                        flat[$"{property.Name}.{innerProperty.Name}"] = innerProperty.Value;
+
+                else
+                    flat[property.Name] = property.Value;
+
+            }
+
+            return flat;
+
+        }
+
+        #endregion
+
+        #region (static) Differences(A, B)
+
+        /// <summary>
+        /// The settings - "ssh" aside - that are not the same in both, each at
+        /// its key in <see cref="Flat"/>.
+        /// </summary>
+        public static IReadOnlyList<String> Differences(TimeServerSettings  A,
+                                                        TimeServerSettings  B)
+        {
+
+            var a = A.Flat();
+            var b = B.Flat();
+
+            return [ .. a.Keys.Where(key => !b.TryGetValue(key, out var other) || !JToken.DeepEquals(a[key], other)) ];
+
+        }
+
+        #endregion
+
 
         #region Helpers
 

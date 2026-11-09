@@ -17,8 +17,10 @@
 
 #region Usings
 
+using System.Globalization;
 using System.Diagnostics.CodeAnalysis;
 
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 using org.GraphDefined.Vanaheimr.Hermod;
@@ -126,7 +128,9 @@ namespace cloud.charging.open.NTSServer
         /// </summary>
         public const                String    HTTPRoot          = "cloud.charging.open.NTSServer.HTTPRoot.";
 
-        private Boolean ntskeOverSSHServed;
+        private          Boolean                                         ntskeOverSSHServed;
+        private readonly Func<TimeServerSettings, TimeServerSettings>?   commandLine;
+        private readonly SemaphoreSlim                                   settingsGate = new (1, 1);
 
         #endregion
 
@@ -150,7 +154,7 @@ namespace cloud.charging.open.NTSServer
         /// <summary>
         /// What keeps the clock to the upstream servers, or null in local mode.
         /// </summary>
-        public UpstreamDiscipline?  Upstream      { get; }
+        public UpstreamDiscipline?  Upstream      { get; private set; }
 
         /// <summary>
         /// The machines that may make key exchanges over SSH.
@@ -267,9 +271,11 @@ namespace cloud.charging.open.NTSServer
             if (!TimeServerSettings.TryParse(ConfigurationDocument[TimeServerSettings.SectionName], out var settings, out var settingsError))
                 throw new InvalidOperationException($"'{this.ConfigFile.Path}': {settingsError} Repair or remove '{this.ConfigFile.Path}' and start again.");
 
-            this.Settings   = CommandLine is not null
-                                  ? CommandLine(settings)
-                                  : settings;
+            this.commandLine  = CommandLine;
+
+            this.Settings     = CommandLine is not null
+                                    ? CommandLine(settings)
+                                    : settings;
 
             this.Directory  = NTSServerPath ?? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(this.ConfigFile.Path)) ?? ".", DefaultDirectory);
 
@@ -339,18 +345,7 @@ namespace cloud.charging.open.NTSServer
             if (Settings.TimeSource == TimeSource.Upstream)
             {
 
-                this.Upstream = new UpstreamDiscipline(
-                                    Settings.Upstream,
-                                    id => NTSGroups.FirstOrDefault(group => group.Id == id),
-                                    this.DNSClient,
-                                    this.Clock,
-                                    this.Log
-                                );
-
-                Upstream.OnSynchronized   += description => Host.StartAsync(description);
-                Upstream.OnRedescribed    += description => Host.StartAsync(description);
-                Upstream.OnUnsynchronized += why         => Host.StopAsync(why);
-                Upstream.OnMeasured       += at          => Host.MarkSynchronized(at);
+                this.Upstream = Following(Settings.Upstream);
 
                 var group = NTSGroups.FirstOrDefault(group => group.Id == Settings.Upstream.Group);
 
@@ -416,6 +411,15 @@ namespace cloud.charging.open.NTSServer
         /// self-signed one kept beside the configuration file.
         /// </summary>
         private NTSKETLSIdentity ChooseIdentity(out String? Note)
+
+            => ChooseIdentity(Settings.Hostname, out Note);
+
+        /// <summary>
+        /// The same, with a self-signed one made out to the given name, where
+        /// one is made - for a hostname changed while running.
+        /// </summary>
+        private NTSKETLSIdentity ChooseIdentity(String?      Hostname,
+                                                out String?  Note)
         {
 
             Note = null;
@@ -449,8 +453,8 @@ namespace cloud.charging.open.NTSServer
 
             var names = new List<String>();
 
-            if (Settings.Hostname is not null)
-                names.Add(Settings.Hostname);
+            if (Hostname is not null)
+                names.Add(Hostname);
 
             names.Add(Environment.MachineName.ToLowerInvariant());
             names.Add("localhost");
@@ -651,6 +655,343 @@ namespace cloud.charging.open.NTSServer
             Log.Notice($"NTS-KE over SSH is switched {(Enabled ? "on" : "off")}.", "ntsserver", "ssh");
 
             return true;
+
+        }
+
+        #endregion
+
+        #region ChangeSettingsAsync(Changes, By)
+
+        /// <summary>
+        /// Change the time server's own settings while it runs - what it listens
+        /// on, the names it goes by, where its time comes from and how - in
+        /// effect at once, and kept in the "ntsServer" section.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The changes are the section as the settings say it, or any part of
+        /// it: what they leave out stays as it is, and a null is the default.
+        /// "ssh" is not among them - NTS-KE over SSH has its own route.
+        /// </para>
+        /// <para>
+        /// Put into effect first and written afterwards, and only what changed:
+        /// a port somebody else has refuses the change with nothing changed, the
+        /// server that answered still answering - and what a switch of this
+        /// start said, and was not changed now, never ends up in the file, as
+        /// the switches promise.
+        /// </para>
+        /// </remarks>
+        /// <param name="Changes">What changes.</param>
+        /// <param name="By">Who changes it, for the log.</param>
+        public async Task<TimeServerSettingsChange> ChangeSettingsAsync(JObject  Changes,
+                                                                        String   By)
+        {
+
+            if (Changes.ContainsKey("ssh"))
+                return new TimeServerSettingsChange(Settings, [], [],
+                           Refused: "NTS-KE over SSH and the NTS clients are changed by PUT v1/ntsServer/ssh, not here.");
+
+            await settingsGate.WaitAsync();
+
+            try
+            {
+
+                var before  = Settings;
+                var merged  = before.ToJSON();
+
+                merged.Merge(Changes, new JsonMergeSettings {
+                                          MergeArrayHandling      = MergeArrayHandling.Replace,
+                                          MergeNullValueHandling  = MergeNullValueHandling.Merge
+                                      });
+
+                TimeServerSettings? requested;
+                String?             invalid;
+
+                // A number where the file reads one is read as one, and text in
+                // its place throws rather than being refused.
+                try
+                {
+                    TimeServerSettings.TryParse(merged, out requested, out invalid);
+                }
+                catch (Exception e) when (e is FormatException or InvalidCastException or OverflowException or ArgumentException)
+                {
+                    requested = null;
+                    invalid   = $"A value of the \"{TimeServerSettings.SectionName}\" section is not of its kind: {e.Message}";
+                }
+
+                if (requested is null)
+                    return new TimeServerSettingsChange(before, [], [], Refused: invalid ?? "These are no settings of the time server.");
+
+                var changed = TimeServerSettings.Differences(before, requested);
+
+                if (changed.Count == 0)
+                    return new TimeServerSettingsChange(before, [], []);
+
+                var notes   = new List<String>();
+
+                if (await ApplyAsync(before, requested, changed, notes) is String notApplied)
+                    return new TimeServerSettingsChange(before, [], [], NotApplied: notApplied);
+
+                if (!TryWriteSettings(requested, changed, out var overridden, out var notSaved))
+                {
+                    await ApplyAsync(requested, before, changed, []);
+                    return new TimeServerSettingsChange(before, [], [], NotSaved: notSaved);
+                }
+
+                foreach (var key in overridden)
+                    notes.Add($"\"{key}\" is set otherwise by a switch this program was started with: what was saved now is in effect now, " +
+                              $"and at a start with the same switch the switch is again.");
+
+                // NTS-KE over SSH changed in the meantime is kept.
+                var now     = Settings;
+
+                Settings    = requested with {
+                                  SSHEnabled  = now.SSHEnabled,
+                                  SSHClients  = now.SSHClients
+                              };
+
+                var was     = before.   Flat();
+                var is_     = requested.Flat();
+
+                Log.Notice($"'{By}' changed the settings of the time server: " +
+                           String.Join(", ", changed.Select(key => $"{key} {TextOf(was[key])} -> {TextOf(is_[key])}")) + ".",
+                           "ntsserver");
+
+                return new TimeServerSettingsChange(Settings, changed, notes);
+
+            }
+            finally
+            {
+                settingsGate.Release();
+            }
+
+        }
+
+        private static String TextOf(JToken Value)
+
+            => Value.Type == JTokenType.Null
+                   ? "nothing"
+                   : Value.ToString(Formatting.None);
+
+        #endregion
+
+        #region (private) ApplyAsync(From, To, Changed, Notes)
+
+        /// <summary>
+        /// Put the given settings into effect where the ones in effect are the
+        /// first: null where they took, why not otherwise - and then nothing
+        /// has changed.
+        /// </summary>
+        /// <remarks>
+        /// What can be refused - a port - comes first, while nothing else has
+        /// changed yet; nothing after it can fail. What local and upstream mode
+        /// are told is asked of the keys that changed, not of the records: a
+        /// default the file leaves out and the same value written out are the
+        /// same setting, and two records apart.
+        /// </remarks>
+        private async Task<String?> ApplyAsync(TimeServerSettings     From,
+                                               TimeServerSettings     To,
+                                               IReadOnlyList<String>  Changed,
+                                               List<String>           Notes)
+        {
+
+            var localChanged     = Changed.Any(key => key.StartsWith("local.",    StringComparison.Ordinal));
+            var upstreamChanged  = Changed.Any(key => key.StartsWith("upstream.", StringComparison.Ordinal));
+
+            #region What is listened on, and what the key exchange names
+
+            var portsChanged = From.NTSKEPort != To.NTSKEPort || From.NTPPort != To.NTPPort;
+
+            if (portsChanged                                                                      ||
+                TimeServerSettings.TextOf(From.Listen) != TimeServerSettings.TextOf(To.Listen)    ||
+                From.RateLimit != To.RateLimit                                                    ||
+                TimeServerHost.AdvertisedNTPOf(From)?.ToString() != TimeServerHost.AdvertisedNTPOf(To)?.ToString())
+            {
+
+                if (await Host.ReconfigureAsync(To) is String problem)
+                    return problem;
+
+                if (portsChanged)
+                    Notes.Add($"Clients are to be told the port{(From.NTSKEPort != To.NTSKEPort && From.NTPPort != To.NTPPort ? "s" : "")}: " +
+                              $"NTS-KE on TCP {To.NTSKEPort}, NTP on UDP {To.NTPPort}.");
+
+            }
+
+            #endregion
+
+            #region The name a self-signed certificate of NTS-KE is made out to
+
+            if (From.Hostname != To.Hostname)
+            {
+
+                var chosen = ChooseIdentity(To.Hostname, out _);
+
+                if (chosen.Fingerprint != Host.Identity.Fingerprint)
+                {
+
+                    await Host.RenewIdentityAsync(chosen);
+
+                    Log.Notice($"NTS-KE over TLS shows {chosen.Subject} ({chosen.Source}) from now on, SHA-256 {chosen.Fingerprint}.", "ntsserver", "tls");
+
+                    Notes.Add($"NTS-KE shows a certificate made anew for the name now, {chosen.Subject}, SHA-256 {chosen.Fingerprint}: " +
+                              $"a client that holds this server to the fingerprint of the one before has to be told this one.");
+
+                }
+
+            }
+
+            #endregion
+
+            #region Where the time comes from
+
+            if (From.TimeSource == TimeSource.Local && To.TimeSource == TimeSource.Upstream)
+            {
+
+                Clock.RunFreely();
+
+                var following = Following(To.Upstream);
+
+                Upstream = following;
+
+                await Host.StopAsync($"the time comes from the NTS group '{To.Upstream.Group}' from now on, and nothing is answered until it has given one.");
+
+                following.Start();
+
+                Notes.Add($"Nothing is answered until the NTS group '{To.Upstream.Group}' has given a time.");
+
+            }
+
+            else if (From.TimeSource == TimeSource.Upstream && To.TimeSource == TimeSource.Local)
+            {
+
+                if (Upstream is UpstreamDiscipline following)
+                {
+                    Upstream = null;
+                    await following.DisposeAsync();
+                }
+
+                var jump = Clock.RunOnTheSystemClock();
+
+                await Host.StartAsync(ClockDescription.Local(To.Local));
+
+                Notes.Add(String.Create(CultureInfo.InvariantCulture,
+                              $"The time handed out is this machine's clock from now on: it jumped by {jump.TotalMilliseconds:+0.000;-0.000} ms."));
+
+            }
+
+            else if (To.TimeSource == TimeSource.Local && localChanged)
+                await Host.StartAsync(ClockDescription.Local(To.Local));
+
+            else if (To.TimeSource == TimeSource.Upstream && upstreamChanged)
+                Upstream?.Reconfigure(To.Upstream);
+
+            if (To.TimeSource == TimeSource.Upstream && localChanged)
+                Notes.Add("What local mode says of its clock is kept for local mode: it is not in effect while the time comes from upstream servers.");
+
+            if (To.TimeSource == TimeSource.Local && upstreamChanged)
+                Notes.Add("How the upstream servers are followed is kept for upstream mode: it is not in effect while the time is this machine's.");
+
+            #endregion
+
+            return null;
+
+        }
+
+        #endregion
+
+        #region (private) Following(Settings)
+
+        /// <summary>
+        /// What keeps the clock to the upstream servers, wired to the time
+        /// server: answering once they gave a time, made anew where the clock
+        /// is described anew, and answering no more after the holdover.
+        /// </summary>
+        private UpstreamDiscipline Following(UpstreamSettings Settings)
+        {
+
+            var upstream = new UpstreamDiscipline(
+                               Settings,
+                               id => NTSGroups.FirstOrDefault(group => group.Id == id),
+                               this.DNSClient,
+                               this.Clock,
+                               this.Log
+                           );
+
+            upstream.OnSynchronized   += description => Host.StartAsync(description);
+            upstream.OnRedescribed    += description => Host.StartAsync(description);
+            upstream.OnUnsynchronized += why         => Host.StopAsync(why);
+            upstream.OnMeasured       += at          => Host.MarkSynchronized(at);
+
+            return upstream;
+
+        }
+
+        #endregion
+
+        #region (private) TryWriteSettings(Settings, Changed, out Overridden, out Error)
+
+        /// <summary>
+        /// Write what changed into the "ntsServer" section, and nothing else -
+        /// a null taken out of the file rather than written into it, so that it
+        /// reads as the default - and say which of it a switch of this start
+        /// sets otherwise.
+        /// </summary>
+        private Boolean TryWriteSettings(TimeServerSettings                Settings,
+                                         IReadOnlyList<String>             Changed,
+                                         out IReadOnlyList<String>         Overridden,
+                                         [NotNullWhen(false)] out String?  Error)
+        {
+
+            Overridden = [];
+
+            if (!ConfigFile.TryLoadDocument(out var document, out Error))
+                return false;
+
+            var section = document[TimeServerSettings.SectionName] as JObject ?? new JObject();
+            var values  = Settings.Flat();
+
+            foreach (var key in Changed)
+            {
+
+                var into  = section;
+                var name  = key;
+                var dot   = key.IndexOf('.');
+
+                if (dot > 0)
+                {
+
+                    name = key[(dot + 1)..];
+
+                    if (section[key[..dot]] is not JObject inner)
+                    {
+                        inner = new JObject();
+                        section[key[..dot]] = inner;
+                    }
+
+                    into = inner;
+
+                }
+
+                if (values[key].Type == JTokenType.Null)
+                    into.Remove(name);
+                else
+                    into[name] = values[key].DeepClone();
+
+            }
+
+            if (!TimeServerSettings.TryParse(section, out var inFile, out var invalid))
+            {
+                Error = $"The \"{TimeServerSettings.SectionName}\" section would no longer read: {invalid}";
+                return false;
+            }
+
+            var atNextStart = (commandLine?.Invoke(inFile) ?? inFile).Flat();
+
+            Overridden = [ .. Changed.Where(key => !JToken.DeepEquals(atNextStart[key], values[key])) ];
+
+            document[TimeServerSettings.SectionName] = section;
+
+            return ConfigFile.TryWrite(document, out Error);
 
         }
 

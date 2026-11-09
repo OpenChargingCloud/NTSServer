@@ -285,6 +285,38 @@ namespace cloud.charging.open.NTSServer
 
         #endregion
 
+        #region RunOnTheSystemClock()
+
+        /// <summary>
+        /// Hand out the wall clock of the operating system from now on,
+        /// uncorrected, as local mode does.
+        /// </summary>
+        /// <remarks>
+        /// For a time source changed from upstream to local while running. The
+        /// time handed out jumps to what the machine says, by as much as the two
+        /// were apart, and nothing measured is kept - no correction, no leap
+        /// second scheduled.
+        /// </remarks>
+        /// <returns>By how much the time handed out jumped.</returns>
+        public TimeSpan RunOnTheSystemClock()
+        {
+            lock (gate)
+            {
+
+                var before  = GetUtcNow();
+
+                baseClock   = System;
+
+                var now     = baseClock.GetUtcNow();
+                segment     = new Segment(now, 0, 0, now, 0, []);
+
+                return now - before;
+
+            }
+        }
+
+        #endregion
+
         #region CorrectionAt(BaseTime)
 
         /// <summary>
