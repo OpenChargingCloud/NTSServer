@@ -378,6 +378,70 @@ namespace cloud.charging.open.NTSServer.Tests
 
         #endregion
 
+        #region TheNTSClientsAreShownWithTheFingerprintsOfTheirKeys()
+
+        /// <summary>
+        /// What the NTS clients page reads: each key with what it is - its
+        /// algorithm, its fingerprint as ssh-keygen -l says it, its comment and
+        /// its options - beside the line it was given as, which is what the
+        /// page sends back.
+        /// </summary>
+        [Test]
+        public async Task TheNTSClientsAreShownWithTheFingerprintsOfTheirKeys()
+        {
+
+            var node  = await Started();
+            var key   = SshHostKey.GenerateEd25519();
+            var line  = "from=\"192.168.1.0/24\" " + SshPublicKey.FromHostKey(key, "cs001").ToAuthorizedKeyLine();
+
+            Assert.That(node.TrySetSSHClients([ new NTSClientEntry("cs001", [ line ], Enabled: false) ], out var error),
+                        Is.True, error);
+
+            var ssh     = node.SSHJSON();
+            var client  = (JObject) ssh["clients"]![0]!;
+            var shown   = (JObject) client["keys"]![0]!;
+
+            Assert.Multiple(() => {
+                Assert.That(ssh["enabled"]!.Value<Boolean>(),      Is.True);
+                Assert.That(ssh["subsystem"]!.Value<String>(),     Is.EqualTo(NTSKE_SSH.SubsystemName));
+                Assert.That(client["name"]!.Value<String>(),       Is.EqualTo("cs001"));
+                Assert.That(client["enabled"]!.Value<Boolean>(),   Is.False);
+                Assert.That(shown["line"]!.Value<String>(),        Is.EqualTo(line));
+                Assert.That(shown["algorithm"]!.Value<String>(),   Is.EqualTo("ssh-ed25519"));
+                Assert.That(shown["fingerprint"]!.Value<String>(), Is.EqualTo(SshPublicKey.FromHostKey(key).Sha256Fingerprint));
+                Assert.That(shown["comment"]!.Value<String>(),     Is.EqualTo("cs001"));
+                Assert.That(shown["options"]!.Values<String>(),    Does.Contain("from=\"192.168.1.0/24\""));
+            });
+
+        }
+
+        #endregion
+
+        #region TheStatusCarriesTheCertificateNTSKEShows()
+
+        /// <summary>
+        /// The certificate alone, in PEM, to be copied for a client - chrony's
+        /// ntstrustedcerts - and the very one whose fingerprint is shown.
+        /// </summary>
+        [Test]
+        public async Task TheStatusCarriesTheCertificateNTSKEShows()
+        {
+
+            var node  = await Started();
+            var pem   = node.StatusJSON()["ntsKE"]!["tls"]!["pem"]!.Value<String>()!;
+
+            using var certificate = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromPem(pem);
+
+            Assert.Multiple(() => {
+                Assert.That(pem,                                               Does.StartWith("-----BEGIN CERTIFICATE-----"));
+                Assert.That(pem,                                               Does.Not.Contain("PRIVATE KEY"));
+                Assert.That(Convert.ToHexString(SHA256.HashData(certificate.RawData)), Is.EqualTo(node.Host.Identity.Fingerprint));
+            });
+
+        }
+
+        #endregion
+
         #region KeyExchangeOverSSH_AStrangerIsNotLetIn()
 
         [Test]

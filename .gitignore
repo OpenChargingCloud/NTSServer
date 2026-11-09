@@ -260,6 +260,10 @@ paket-files/
 __pycache__/
 *.pyc
 
+# What webpack emits for the web interface. Built by the project file, so a
+# checkout needs node and not a copy of the bundle.
+/NTSServer/Frontend/dist/
+
 # What an NTS server writes beside itself when it runs from a build
 # directory: its configuration, its accounts, its log and - with more to lose
 # than any of them - its directory with the private key of its TLS identity

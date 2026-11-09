@@ -4,10 +4,11 @@ The time server of the OpenChargingCloud: a
 [WWCP_Node](https://github.com/OpenChargingCloud/WWCP_Node) that hands out
 time over NTS - NTS-KE over TLS 1.3 (RFC 8915) and over SSH (the subsystem
 `ntske/1@open.charging.cloud`), and NTP and NTP+NTS - with a JSON API below
-`/api/v1/ntsServer`. The time is either the clock of the machine it runs on,
-or the time of a group of upstream NTS servers it follows, without ever
-setting the machine's clock. The protocols themselves - NTS-KE, NTP, the
-cookies, the AEAD - are [Norn](https://github.com/Vanaheimr/Norn)'s.
+`/api/v1/ntsServer` and a web interface at `/ntsServer`. The time is either
+the clock of the machine it runs on, or the time of a group of upstream NTS
+servers it follows, without ever setting the machine's clock. The protocols
+themselves - NTS-KE, NTP, the cookies, the AEAD - are
+[Norn](https://github.com/Vanaheimr/Norn)'s.
 
 It is not built alone:
 [NTSServerCLI](https://github.com/OpenChargingCloud/NTSServerCLI) pins it
@@ -24,7 +25,8 @@ how the server is configured and run.
 | `NTSServer/NTSKETLSIdentity.cs` | the certificate NTS-KE over TLS shows: a TLS server identity of the store, or a self-signed one |
 | `NTSServer/SecureShell/` | the machines let in for NTS-KE over SSH, by their SSH keys |
 | `NTSServer/HTTPAPI/` | the routes below `v1/ntsServer` |
-| `NTSServerTests/` | the settings and the clock, the server asked by Norn's own client over TLS and SSH and as the upstream server of another, and WWCP_Node's conformance suite asked of an NTS server |
+| `NTSServer/Frontend/` | the web interface - the time server, the NTS clients, the configuration - bundled by webpack with what every node shares, and embedded into the assembly |
+| `NTSServerTests/` | the settings and the clock, the server asked by Norn's own client over TLS and SSH and as the upstream server of another, cookies across a restart, and WWCP_Node's conformance suite asked of an NTS server, its web interface among it; the web interface's own tests are beside its pages, run by `npm test` |
 
 
 ## Your participation

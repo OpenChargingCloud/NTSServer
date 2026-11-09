@@ -1,0 +1,35 @@
+{
+  "name": "ntsserver-frontend",
+  "version": "0.1.0",
+  "description": "The web interface of the OpenChargingCloud NTS server: HTML, SCSS and TypeScript bundled by webpack, served by the Hermod HTTP/1.1 server.",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "webpack --mode production",
+    "watch": "webpack --mode development --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import ../../../WWCP_Node/Frontend/test/resolve.ts --test \"src/**/*.test.ts\"",
+    "typecheck:test": "tsc -p tsconfig.test.json"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "^21.0.4",
+    "css-loader": "^7.1.5",
+    "happy-dom": "^21.0.4",
+    "html-webpack-plugin": "^5.6.8",
+    "mini-css-extract-plugin": "^2.10.2",
+    "sass": "^1.108.1",
+    "sass-loader": "^17.1.0",
+    "terser-webpack-plugin": "^5.6.1",
+    "ts-loader": "^9.6.2",
+    "typescript": "^6.0.3",
+    "webpack": "^5.112.2",
+    "webpack-cli": "^7.3.1"
+  },
+  "dependencies": {
+    "@fortawesome/fontawesome-free": "^7.3.1",
+    "lit-html": "3.3.3"
+  }
+}

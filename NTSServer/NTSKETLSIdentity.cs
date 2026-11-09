@@ -76,6 +76,17 @@ namespace cloud.charging.open.NTSServer
                                           Boolean                 IsSelfSigned)
     {
 
+        #region CertificatePEM
+
+        /// <summary>
+        /// The certificate alone, in PEM, as a client is told to trust it -
+        /// chrony's ntstrustedcerts - and never the key with it.
+        /// </summary>
+        public String CertificatePEM
+            => PemEncoding.WriteString("CERTIFICATE", Certificate.GetEncoded()) + "\n";
+
+        #endregion
+
         #region Data
 
         /// <summary>

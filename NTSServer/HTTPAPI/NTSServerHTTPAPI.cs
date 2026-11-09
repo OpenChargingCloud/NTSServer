@@ -81,6 +81,7 @@ namespace cloud.charging.open.NTSServer
             AddHandler(root,                GetStatus,    HTTPMethod.GET);
             AddHandler(root + "/settings",  GetSettings,  HTTPMethod.GET);
             AddHandler(root + "/sync",      PostSync,     HTTPMethod.POST);
+            AddHandler(root + "/ssh",       GetSSH,       HTTPMethod.GET);
             AddHandler(root + "/ssh",       PutSSH,       HTTPMethod.PUT);
 
         }
@@ -132,6 +133,24 @@ namespace cloud.charging.open.NTSServer
             var status = await upstream.PollAsync();
 
             return JSONResponse(Request, HTTPStatusCode.OK, status.ToJSON(NTSServer.Clock.Base.GetUtcNow()));
+
+        }
+
+        #endregion
+
+        #region (private) GetSSH(Request)
+
+        /// <summary>
+        /// NTS-KE over SSH and the NTS clients, each key with its fingerprint:
+        /// what the NTS clients page shows.
+        /// </summary>
+        private Task<HTTPResponse> GetSSH(HTTPRequest Request)
+        {
+
+            if (!TryAuthorize(Request, Permission.Read(NTSServerAccess.TimeServer), false, out _, out var refused))
+                return Task.FromResult(refused);
+
+            return Task.FromResult(JSONResponse(Request, HTTPStatusCode.OK, NTSServer.SSHJSON()));
 
         }
 
@@ -189,7 +208,7 @@ namespace cloud.charging.open.NTSServer
 
             }
 
-            return Task.FromResult(JSONResponse(Request, HTTPStatusCode.OK, NTSServer.Settings.SSHToJSON()));
+            return Task.FromResult(JSONResponse(Request, HTTPStatusCode.OK, NTSServer.SSHJSON()));
 
         }
 

@@ -115,9 +115,16 @@ namespace cloud.charging.open.NTSServer
 
         /// <summary>
         /// The directory beside the configuration file the time server keeps its
-        /// own secrets in: the self-signed TLS identity of NTS-KE.
+        /// own secrets in: the self-signed TLS identity of NTS-KE, and the master
+        /// keys of its cookies.
         /// </summary>
         public const                String    DefaultDirectory  = "ntsServer";
+
+        /// <summary>
+        /// The manifest resource prefix of the embedded web interface (see the
+        /// EmbedFrontend target of NTSServer.csproj).
+        /// </summary>
+        public const                String    HTTPRoot          = "cloud.charging.open.NTSServer.HTTPRoot.";
 
         private Boolean ntskeOverSSHServed;
 
@@ -184,7 +191,7 @@ namespace cloud.charging.open.NTSServer
         /// <param name="ConfigFile">Where the configuration lives between starts.</param>
         /// <param name="DNSClient">How to resolve names, or null to make a client.</param>
         /// <param name="NTSClient">Where the node reads the time for its own check, or null to make a client.</param>
-        /// <param name="Frontend">Where the web interface comes from, or null for none.</param>
+        /// <param name="Frontend">Where the web interface comes from, or null for the embedded bundle.</param>
         /// <param name="CertificatesPath">The directory the node's certificate store lives in between starts.</param>
         /// <param name="NTSServerPath">The directory the time server keeps its own secrets in; "ntsServer" beside the configuration file by default.</param>
         /// <param name="Log">Where everything that happens is written, or null to make a log.</param>
@@ -233,7 +240,7 @@ namespace cloud.charging.open.NTSServer
                    ConfigFile:            ConfigFile,
                    DNSClient:             DNSClient,
                    NTSClient:             NTSClient,
-                   Frontend:              Frontend,
+                   Frontend:              Frontend ?? new EmbeddedContentSource(HTTPRoot, typeof(NTSServerNode).Assembly),
                    CertificatesPath:      CertificatesPath,
                    CertificateKinds:      CertificateKinds,
                    CertificateListeners:  [ NTSKEListener, WebServerCertificate.Listener ],
@@ -675,7 +682,8 @@ namespace cloud.charging.open.NTSServer
                                new JProperty("fingerprint",   Host.Identity.Fingerprint),
                                new JProperty("notAfter",      Host.Identity.NotAfter.ToString("o")),
                                new JProperty("source",        Host.Identity.Source),
-                               new JProperty("selfSigned",    Host.Identity.IsSelfSigned)
+                               new JProperty("selfSigned",    Host.Identity.IsSelfSigned),
+                               new JProperty("pem",           Host.Identity.CertificatePEM)
                            ))
                        )),
                        new JProperty("ntp",           new JObject(
@@ -703,6 +711,55 @@ namespace cloud.charging.open.NTSServer
                        )),
                        new JProperty("upstream",      upstream?.ToJSON(Clock.Base.GetUtcNow())),
                        new JProperty("metrics",       Host.MetricsJSON())
+                   );
+
+        }
+
+        #endregion
+
+        #region SSHJSON()
+
+        /// <summary>
+        /// NTS-KE over SSH as the NTS clients page shows it: whether it is
+        /// switched on and served, where a client reaches it and what host key
+        /// it holds the server to - and the NTS clients, each key with what it
+        /// is: its algorithm, its fingerprint, its comment and its options,
+        /// beside the line it was given as, which is what is sent back.
+        /// </summary>
+        public JObject SSHJSON()
+
+            => new (
+                   new JProperty("enabled",    Settings.SSHEnabled),
+                   new JProperty("served",     NTSKEOverSSH),
+                   new JProperty("subsystem",  NTSKE_SSH.SubsystemName),
+                   new JProperty("url",        SSHURL),
+                   new JProperty("hostKey",    SSHHostKey),
+                   new JProperty("clients",    new JArray(Settings.SSHClients.Select(client => new JObject(
+                       new JProperty("name",       client.Name),
+                       new JProperty("enabled",    client.Enabled),
+                       new JProperty("keys",       new JArray(client.Keys.Select(KeyJSON)))
+                   ))))
+               );
+
+        private static JObject KeyJSON(String Line)
+        {
+
+            // Every line was parsed before it was taken in; one that does not
+            // parse now is said as it stands, with nothing made up about it.
+            if (!TimeServerSettings.IsAuthorizedKeyLine(Line, out _) ||
+                !org.GraphDefined.Vanaheimr.Hermod.SSH.AuthorizedKeysFile.TryParseLine(Line, out var key) ||
+                key is null)
+            {
+                return new JObject(new JProperty("line", Line));
+            }
+
+            return new JObject(
+                       new JProperty("line",         Line),
+                       new JProperty("algorithm",    key.PublicKey.Algorithm),
+                       new JProperty("fingerprint",  key.PublicKey.Sha256Fingerprint),
+                       new JProperty("comment",      key.PublicKey.Comment.Length > 0 ? key.PublicKey.Comment : null),
+                       new JProperty("notAfter",     key.NotAfter?.ToString("o")),
+                       new JProperty("options",      new JArray(key.Options))
                    );
 
         }
