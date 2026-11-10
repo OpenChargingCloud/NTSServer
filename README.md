@@ -26,7 +26,7 @@ how the server is configured and run.
 | `NTSServer/SecureShell/` | the machines let in for NTS-KE over SSH, by their SSH keys or the user certificates of an SSH CA, and when each was last served |
 | `NTSServer/HTTPAPI/` | the routes below `v1/ntsServer`, a new master key among them |
 | `NTSServer/Frontend/` | the web interface - the time server with the master keys of its cookies, its settings, the NTS clients with when each was last served, the configuration - bundled by webpack with what every node shares, and embedded into the assembly |
-| `NTSServerTests/` | the settings and the clock, leap seconds, the server asked by Norn's own client over TLS and SSH and as the upstream server of another - a leap second it announces passed on and made among it - the settings changed while running, cookies across a restart, and WWCP_Node's conformance suite asked of an NTS server, its web interface among it; the web interface's own tests are beside its pages, run by `npm test` |
+| `NTSServerTests/` | the settings and the clock, leap seconds, the server asked by Norn's own client over TLS and SSH and as the upstream server of another - a leap second it announces passed on and made among it, and the server not followed where it says it is not synchronized itself - the settings changed while running, cookies across a restart, and WWCP_Node's conformance suite asked of an NTS server, its web interface among it; the web interface's own tests are beside its pages, run by `npm test` |
 
 
 ## Your participation

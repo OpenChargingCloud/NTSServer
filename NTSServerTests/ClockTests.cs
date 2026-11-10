@@ -347,10 +347,13 @@ namespace cloud.charging.open.NTSServer.Tests
             Assert.That(UpstreamDiscipline.LeapVote([ 2, 2, 1 ]),    Is.EqualTo(2));
             Assert.That(UpstreamDiscipline.LeapVote([ 1 ]),          Is.EqualTo(1));
 
-            // Half is not more than half, and an unsynchronized server is a voice against it.
+            // Half is not more than half, and a server announcing nothing - or the
+            // opposite - is a voice against it. An unsynchronized one (3) never
+            // gets this far, Norn's client turns it away; were it to, it too would
+            // be a voice against.
             Assert.That(UpstreamDiscipline.LeapVote([ 1, 1, 0, 0 ]), Is.EqualTo(0));
-            Assert.That(UpstreamDiscipline.LeapVote([ 1, 3 ]),       Is.EqualTo(0));
             Assert.That(UpstreamDiscipline.LeapVote([ 1, 2 ]),       Is.EqualTo(0));
+            Assert.That(UpstreamDiscipline.LeapVote([ 1, 3 ]),       Is.EqualTo(0));
             Assert.That(UpstreamDiscipline.LeapVote([]),             Is.EqualTo(0));
 
         }

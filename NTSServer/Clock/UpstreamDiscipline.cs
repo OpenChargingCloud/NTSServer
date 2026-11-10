@@ -953,9 +953,13 @@ namespace cloud.charging.open.NTSServer
         /// <summary>
         /// The leap indicator of a round: 1 or 2 where more than half of the
         /// authenticated answers say so, 0 otherwise - so that a single server
-        /// cannot have a leap second made, and an unsynchronized one (3) is a
-        /// voice against it.
+        /// cannot have a leap second made.
         /// </summary>
+        /// <remarks>
+        /// An unsynchronized server (3) is not among the answers: Norn's NTS
+        /// client turns its answer away, as RFC 5905 asks. Were one to get
+        /// here, it would be a voice against the leap second like any other.
+        /// </remarks>
         internal static Byte LeapVote(IReadOnlyList<Byte> LeapIndicators)
         {
 

@@ -1146,6 +1146,43 @@ namespace cloud.charging.open.NTSServer.Tests
 
         #endregion
 
+        #region UpstreamMode_DoesNotFollowAServerThatIsNotSynchronizedItself()
+
+        /// <summary>
+        /// An upstream server that says its own clock is not synchronized -
+        /// leap indicator 3 - is not followed, however well it authenticates:
+        /// its answer counts neither toward the quorum nor in the median, and
+        /// nothing is handed out.
+        /// </summary>
+        /// <remarks>
+        /// It is Norn's NTS client that turns the answer away, not this server;
+        /// the test is here because this server relies on it, and because the
+        /// reason has to reach the log. No NTS server of this kind hands out 3 -
+        /// see the remarks of TimeServerHost - so the upstream server is told
+        /// to, as the kernel of another server would tell it.
+        /// </remarks>
+        [Test]
+        public async Task UpstreamMode_DoesNotFollowAServerThatIsNotSynchronizedItself()
+        {
+
+            var upstream   = await Started(new JObject(new JProperty("local", new JObject(new JProperty("stratum", 1), new JProperty("referenceId", "GPS")))));
+
+            await upstream.Host.StartAsync(upstream.Host.Description! with { LeapIndicator = 3 });
+
+            var downstream = await StartedFollowing(upstream);
+            var status     = await downstream.Upstream!.PollAsync();
+
+            Assert.Multiple(() => {
+                Assert.That(status.Synchronized,        Is.False,  "a server that is not synchronized itself was followed");
+                Assert.That(status.Answered,            Is.EqualTo(0));
+                Assert.That(status.LastProblem,         Does.Contain("unsynchronized clock"));
+                Assert.That(downstream.Host.IsServing,  Is.False);
+            });
+
+        }
+
+        #endregion
+
 
         #region (private) SectionInFile(Node)
 
