@@ -24,9 +24,10 @@ how the server is configured and run.
 | `NTSServer/TimeServerHost.cs` | Norn's NTS server, made anew where that description changes, with the master keys of the cookies in a file and rotated on request, and what each login made of NTS-KE over SSH |
 | `NTSServer/NTSKETLSIdentity.cs` | the certificate NTS-KE over TLS shows: a TLS server identity of the store, or a self-signed one |
 | `NTSServer/SecureShell/` | the machines let in for NTS-KE over SSH, by their SSH keys or the user certificates of an SSH CA, and when each was last served |
+| `NTSServer/CommandLine/` | what can be typed at the running server - `timeServer`, `masterKeys` and `ntsClients` beside every node's commands - at its console and by whoever signs in over SSH, whichever program runs it |
 | `NTSServer/HTTPAPI/` | the routes below `v1/ntsServer`, a new master key among them |
 | `NTSServer/Frontend/` | the web interface - the time server with the master keys of its cookies, its settings, the NTS clients with when each was last served, the configuration - bundled by webpack with what every node shares, and embedded into the assembly |
-| `NTSServerTests/` | the settings and the clock, leap seconds, the server asked by Norn's own client over TLS and SSH and as the upstream server of another - a leap second it announces passed on and made among it, and the server not followed where it says it is not synchronized itself - the settings changed while running, cookies across a restart, and WWCP_Node's conformance suite asked of an NTS server, its web interface among it; the web interface's own tests are beside its pages, run by `npm test` |
+| `NTSServerTests/` | the settings and the clock, leap seconds, the server asked by Norn's own client over TLS and SSH and as the upstream server of another - a leap second it announces passed on and made among it, and the server not followed where it says it is not synchronized itself - the settings changed while running, the commands of the prompt at the console and over SSH, cookies across a restart, and WWCP_Node's conformance suite asked of an NTS server, its web interface among it; the web interface's own tests are beside its pages, run by `npm test` |
 
 
 ## Your participation

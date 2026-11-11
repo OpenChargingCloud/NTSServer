@@ -54,7 +54,7 @@ namespace cloud.charging.open.NTSServer.Tests
     /// </remarks>
     [TestFixture]
     [NonParallelizable]
-    public class NTSServerNodeTests
+    public partial class NTSServerNodeTests
     {
 
         #region Data

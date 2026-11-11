@@ -36,6 +36,7 @@ using cloud.charging.open.protocols.WWCP.Node.Configuration;
 using cloud.charging.open.protocols.WWCP.Node.SecureShell;
 
 using cloud.charging.open.NTSServer.SecureShell;
+using cloud.charging.open.NTSServer.CommandLine;
 
 #endregion
 
@@ -395,6 +396,16 @@ namespace cloud.charging.open.NTSServer
                            APIPath:     this.HTTPRootPath,
                            Version:     Version
                        );
+
+            #endregion
+
+            #region What somebody signed in over SSH gets
+
+            // The NTS server's command line, with its commands beside the
+            // node's - whichever program runs this NTS server, and not only
+            // NTSServerCLI. Before the node starts, as the node asks; a
+            // program with a command line of its own sets another after this.
+            CommandLines = (terminal, caller) => new NTSServerCLI(this, terminal, caller);
 
             #endregion
 
