@@ -476,7 +476,7 @@ namespace cloud.charging.open.NTSServer
 
             if (!verdict.IsUsable || verdict.Offset is null)
             {
-                await Failed(WhyNotUsable(verdict, group));
+                await Failed(WhyNotUsable(verdict, group.Id.ToString()));
                 return;
             }
 
@@ -488,21 +488,13 @@ namespace cloud.charging.open.NTSServer
             var offset   = median - clock.LeapSecondsAt(at).TotalSeconds;
 
             // The server the reference identifier names, and whose stratum,
-            // root delay and root dispersion this server's are built on: the
-            // one named last time, for as long as it gives an authenticated
-            // answer - and otherwise the one whose answer the median is
-            // closest to. Which of four servers of the same institution is a
-            // tenth of a millisecond closer changes from round to round, and
-            // a server that renamed its reference with every round would be
-            // described anew with every round. The time is the median's
-            // either way; the system peer only describes it.
+            // root delay and root dispersion this server's are built on - see
+            // SystemPeer.
             var trusted  = verdict.Results.
                                    Where  (TimeSyncVerdict.CanBeTrusted).
                                    ToArray();
 
-            var peer     = trusted.FirstOrDefault(result => result.ServerHostname.ToString().TrimEnd('.') == systemPeer)
-                               ?? trusted.OrderBy(result => Math.Abs(result.NTP!.Offset.TotalSeconds - median)).
-                                          First();
+            var peer     = SystemPeer(trusted, systemPeer, verdict.Offset.Value, group.Sources.MaxDeviation);
 
             lastGood         = at;
             lastProblem      = null;
@@ -973,10 +965,64 @@ namespace cloud.charging.open.NTSServer
 
         #endregion
 
-        #region (private static) WhyNotUsable(Verdict, Group)
+        #region (internal static) SystemPeer(Trusted, Named, Median, MaxDeviation)
 
-        private static String WhyNotUsable(TimeSyncVerdict  Verdict,
-                                           NTSGroup         Group)
+        /// <summary>
+        /// The server this server's description is built on: the one named
+        /// last time, for as long as it gives an authenticated answer that
+        /// agrees with the time - and otherwise the one whose answer the
+        /// median is closest to.
+        /// </summary>
+        /// <remarks>
+        /// Which of four servers of the same institution is a tenth of a
+        /// millisecond closer changes from round to round, and a server that
+        /// renamed its reference with every round would be described anew with
+        /// every round. The time is the median's either way; the system peer
+        /// only describes it - and so it is one of the servers the median is
+        /// made of. Where a majority outvoted the rest, Norn takes the median
+        /// of that majority only, and a server further than the group's
+        /// MaxDeviation from it is one of the outvoted: its stratum and root
+        /// dispersion say nothing about the time handed out.
+        /// </remarks>
+        /// <param name="Trusted">The authenticated answers of the round.</param>
+        /// <param name="Named">The server named last time, if any.</param>
+        /// <param name="Median">The time of the round, as an offset.</param>
+        /// <param name="MaxDeviation">How far apart the group allows its servers to be.</param>
+        internal static NTSMeasurementResult SystemPeer(IReadOnlyList<NTSMeasurementResult>  Trusted,
+                                                        String?                              Named,
+                                                        TimeSpan                             Median,
+                                                        TimeSpan                             MaxDeviation)
+        {
+
+            var agreeing = Trusted.Where  (result => (result.NTP!.Offset - Median).Duration() < MaxDeviation).
+                                   ToArray();
+
+            // Never empty while the median is the median of answers - the one
+            // closest to it is within any deviation that let it be one - but
+            // were it, the closest of all is still a better description than
+            // none.
+            if (agreeing.Length == 0)
+                agreeing = [.. Trusted];
+
+            return agreeing.FirstOrDefault(result => result.ServerHostname.ToString().TrimEnd('.') == Named)
+                       ?? agreeing.OrderBy(result => (result.NTP!.Offset - Median).Duration()).
+                                   First();
+
+        }
+
+        #endregion
+
+        #region (internal static) WhyNotUsable(Verdict, GroupId)
+
+        /// <summary>
+        /// Why a round produced no time, as LastProblem says it.
+        /// </summary>
+        /// <remarks>
+        /// Servers that all answered and disagree are not "nobody answered",
+        /// which is what this said when Norn first told them apart.
+        /// </remarks>
+        internal static String WhyNotUsable(TimeSyncVerdict  Verdict,
+                                            String           GroupId)
         {
 
             var problems = Verdict.Results.
@@ -984,11 +1030,14 @@ namespace cloud.charging.open.NTSServer
                                    Select(result => $"{result.ServerHostname.ToString().TrimEnd('.')}: {result.ErrorMessage?.ToString() ?? result.NTP?.ErrorMessage?.ToString() ?? "no authenticated answer"}").
                                    ToArray();
 
+            var why      = problems.Length > 0
+                               ? $" ({String.Join("; ", problems)})"
+                               : "";
+
             return Verdict.Outcome switch {
-                       TimeSyncOutcome.TooFewServers    => $"{Verdict.Answered} of the NTS group '{Group.Id}' answered, and {Verdict.Required} must" +
-                                                           (problems.Length > 0 ? $" ({String.Join("; ", problems)})" : ""),
-                       _                                => $"nobody of the NTS group '{Group.Id}' answered" +
-                                                           (problems.Length > 0 ? $" ({String.Join("; ", problems)})" : "")
+                       TimeSyncOutcome.TooFewServers    => $"{Verdict.Answered} of the NTS group '{GroupId}' answered, and {Verdict.Required} must{why}",
+                       TimeSyncOutcome.ServersDisagree  => $"the servers of the NTS group '{GroupId}' disagree - {Verdict}{why}",
+                       _                                => $"nobody of the NTS group '{GroupId}' answered{why}"
                    };
 
         }
