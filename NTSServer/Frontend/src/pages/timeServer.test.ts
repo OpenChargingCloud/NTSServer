@@ -4,7 +4,8 @@
  * upstream mode the last round, and "Ask them now" for whoever may run the
  * time servers - and greyed out, with why, for whoever may not. The master
  * keys of the cookies, a new one that keeps the others and one that forgets
- * them, asked first; and the key exchanges over SSH since the start.
+ * them, asked first; the keys the responses are signed with, a new one and
+ * one retired; and the key exchanges over SSH since the start.
  */
 
 import { asked, open, refused, said, until, type Asked } from '../../test/ntsServer.ts';
@@ -34,6 +35,14 @@ const firstKeys: Key[] = [ { id: 1, notBefore: '2026-11-08T12:00:00Z', notAfter:
 
 let masterKeys: Key[] = firstKeys;
 
+interface SigningKey { id: number; publicKey: string; ellipticCurve: string; signatureAlgorithm: string;
+                       notBefore: string | null; notAfter: string | null; state: 'signs' | 'valid' | 'next' | 'retired' }
+
+const firstSigningKeys: SigningKey[] = [ { id: 1, publicKey: 'BPubKeyOne', ellipticCurve: 'secp256r1', signatureAlgorithm: 'SHA-256withECDSA',
+                                           notBefore: null, notAfter: null, state: 'signs' } ];
+
+let signingKeys: SigningKey[] = firstSigningKeys;
+
 function status(Upstream: boolean, Synchronized = true): Record<string, unknown> {
 
     return {
@@ -50,6 +59,7 @@ function status(Upstream: boolean, Synchronized = true): Record<string, unknown>
                                                             { name: 'cs002', enabled: false, keys: 1, activity: none  } ],
                          accounts: [ { name: 'alice', activity: alice } ] },
         masterKeys,
+        signingKeys,
         clock:         { now: '2026-11-09T12:30:00Z', base: Upstream ? 'free-running' : 'system', correctionMs: 121.9, frequencyPPM: 3.25,
                          leapSeconds: 0, leapSecond: null,
                          description: { stratum: Upstream ? 2 : 1, referenceId: Upstream ? '192.53.103.108' : 'LOCL',
@@ -92,8 +102,37 @@ function ntsServer({ method, path, body }: Asked): unknown {
 
     }
 
+    if (method === 'POST' && path === '/ntsServer/signingKeys') {
+
+        const atOnce = (body as { atOnce: boolean }).atOnce;
+        const id     = Math.max(...signingKeys.map(key => key.id)) + 1;
+        const made: SigningKey = { id, publicKey: `BPubKey${id}`, ellipticCurve: 'secp256r1', signatureAlgorithm: 'SHA-256withECDSA',
+                                   notBefore: atOnce ? '2026-11-09T12:30:00Z' : '2026-11-10T12:30:00Z', notAfter: null,
+                                   state: atOnce ? 'signs' : 'next' };
+
+        signingKeys = [ ...signingKeys.map(key => atOnce && key.state === 'signs' ? { ...key, state: 'valid' as const } : key), made ];
+
+        return { made, signingKeys };
+
+    }
+
+    if (method === 'POST' && path === '/ntsServer/signingKeys/retire') {
+
+        const id      = (body as { id: number }).id;
+        const retired = { ...signingKeys.find(key => key.id === id)!, notAfter: '2026-11-09T12:30:00Z', state: 'retired' as const };
+
+        signingKeys = signingKeys.map(key => key.id === id ? retired : key);
+
+        return { retired, signingKeys };
+
+    }
+
     return undefined;
 
+}
+
+function signingRequests(): { path: string; body: unknown }[] {
+    return asked.filter(one => one.method === 'POST' && one.path.startsWith('/ntsServer/signingKeys')).map(one => ({ path: one.path, body: one.body }));
 }
 
 function rotations(): unknown[] {
@@ -288,6 +327,122 @@ describe('the master keys of the cookies', () => {
         assert.equal(root.querySelector<HTMLButtonElement>('#rotate')!.disabled, true);
 
         masterKeys = firstKeys;
+
+    });
+
+});
+
+
+describe('the keys the responses are signed with', () => {
+
+    it('shows them - public keys, and which one signs now - and makes a new one that begins a day later', async () => {
+
+        upstream    = false;
+        signingKeys = firstSigningKeys;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read', 'timeserver:edit' ],
+                                ntsServer, root => root.querySelector('#signing-keys') !== null);
+
+        assert.equal(root.querySelectorAll('tr[data-signing-key]').length, 1);
+        assert.match(root.querySelector('tr[data-signing-key="1"]')!.textContent!, /signs now/);
+        assert.match(root.querySelector('tr[data-signing-key="1"]')!.textContent!, /BPubKeyOne/);
+        assert.match(root.querySelector('tr[data-signing-key="1"]')!.textContent!, /always/);
+
+        root.querySelector<HTMLButtonElement>('#new-signing-key')!.click();
+
+        await until(() => /new signing key 2 signs from .* on; its public key is handed out until then/.test(root.querySelector('#signing-note')!.textContent!),
+                    'the new key was not said');
+
+        assert.deepEqual(signingRequests(), [ { path: '/ntsServer/signingKeys', body: { atOnce: false } } ]);
+        assert.equal(said.length, 0, 'asked before a key that signs only tomorrow');
+        assert.match(root.querySelector('tr[data-signing-key="2"]')!.textContent!, /next/);
+        assert.match(root.querySelector('tr[data-signing-key="1"]')!.textContent!, /signs now/);
+
+    });
+
+    it('asks before a new key signs at once', async () => {
+
+        upstream    = false;
+        signingKeys = firstSigningKeys;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read', 'timeserver:edit' ],
+                                ntsServer, root => root.querySelector('#signing-keys') !== null);
+
+        root.querySelector<HTMLButtonElement>('#new-signing-key-now')!.click();
+
+        await until(() => /new signing key 2 signs from now on/.test(root.querySelector('#signing-note')!.textContent!), 'the new key was not said');
+
+        assert.ok(said.some(text => /signing at once\?/.test(text)), 'nobody was asked before the key signed at once');
+        assert.deepEqual(signingRequests(), [ { path: '/ntsServer/signingKeys', body: { atOnce: true } } ]);
+        assert.match(root.querySelector('tr[data-signing-key="2"]')!.textContent!, /signs now/);
+        assert.match(root.querySelector('tr[data-signing-key="1"]')!.textContent!, /by its id/);
+
+    });
+
+    it('retires one, asked first, and offers no button for it any more', async () => {
+
+        upstream    = false;
+        signingKeys = firstSigningKeys;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read', 'timeserver:edit' ],
+                                ntsServer, root => root.querySelector('#signing-keys') !== null);
+
+        root.querySelector<HTMLButtonElement>('button[data-retire="1"]')!.click();
+
+        await until(() => /signing key 1 signs nothing from now on/.test(root.querySelector('#signing-note')!.textContent!), 'the retirement was not said');
+
+        assert.ok(said.some(text => /Retire the signing key 1\?/.test(text)), 'nobody was asked before the key was retired');
+        assert.deepEqual(signingRequests(), [ { path: '/ntsServer/signingKeys/retire', body: { id: 1 } } ]);
+        assert.match(root.querySelector('tr[data-signing-key="1"]')!.textContent!, /retired/);
+        assert.equal(root.querySelector('button[data-retire="1"]'), null);
+
+    });
+
+    it('says what the server refused', async () => {
+
+        upstream    = false;
+        signingKeys = firstSigningKeys;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read', 'timeserver:edit' ],
+                                asked => asked.path === '/ntsServer/signingKeys' ? refused(409, 'could not be read') : ntsServer(asked),
+                                root => root.querySelector('#signing-keys') !== null);
+
+        root.querySelector<HTMLButtonElement>('#new-signing-key')!.click();
+
+        await until(() => root.querySelector('#signing-error')!.textContent !== '', 'the refusal was not said');
+
+        assert.match(root.querySelector('#signing-error')!.textContent!, /could not be read/);
+        assert.equal(root.querySelectorAll('tr[data-signing-key]').length, 1);
+
+    });
+
+    it('greys everything out, with why, for whoever may only read the time server', async () => {
+
+        upstream    = false;
+        signingKeys = firstSigningKeys;
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read' ],
+                                ntsServer, root => root.querySelector('#signing-keys') !== null);
+
+        for (const button of root.querySelectorAll<HTMLButtonElement>('#new-signing-key, #new-signing-key-now, button[data-retire]'))
+        {
+            assert.equal(button.disabled, true, `${button.id || button.dataset['retire']} can be pressed`);
+            assert.match(button.title, /may read the time server but not change it/);
+        }
+
+    });
+
+    it('says there is none where none is kept', async () => {
+
+        upstream    = false;
+        signingKeys = [];
+
+        const root = await open(timeServerPage, '/ntsServer', [ 'timeserver:read', 'timeserver:edit' ],
+                                ntsServer, root => root.querySelector('#signing-keys') !== null);
+
+        assert.match(root.querySelector('#no-signing-keys')!.textContent!, /no response is signed/);
+
+        signingKeys = firstSigningKeys;
 
     });
 

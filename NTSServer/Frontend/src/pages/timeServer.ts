@@ -1,6 +1,7 @@
 import { api,
          type ClockDescription,
          type MasterKey,
+         type SigningKey,
          type TimeServerStatus,
          type UpstreamStatus }  from '../api/client';
 import { auth } from '../auth';
@@ -15,10 +16,11 @@ import { html, nothing, render, type TemplateResult } from '@node/view';
  * upstream servers were at the last round, what NTS-KE over TLS shows and
  * how a client is told to trust it, and how much it answered.
  *
- * Read-only but for two things: "Ask them now", for whoever may run the
- * node's time servers, and a new master key of the cookies, for whoever may
- * change the time server - the "rotate the cookie master key" of section 8.2
- * of the white paper "NTS Key Establishment over SSH". What changes otherwise
+ * Read-only but for "Ask them now", for whoever may run the node's time
+ * servers, and the keys, for whoever may change the time server: a new master
+ * key of the cookies - the "rotate the cookie master key" of section 8.2 of
+ * the white paper "NTS Key Establishment over SSH" - and a new key to sign the
+ * responses with, or one retired. What changes otherwise
  * is the configuration file's, the NTS clients page's and the Server
  * identities page's.
  */
@@ -46,6 +48,8 @@ export const timeServerPage: Page = {
         let askFailed: string | null = null;
         let rotated: string | null = null;
         let rotateFailed: string | null = null;
+        let signed: string | null = null;
+        let signFailed: string | null = null;
 
 
         function draw(): void {
@@ -64,6 +68,7 @@ export const timeServerPage: Page = {
                     ${ntpCard(status)}
                     ${sshCard(status)}
                     ${masterKeysCard(status.masterKeys)}
+                    ${signingKeysCard(status.signingKeys)}
                     ${answeredCard(status)}
                 </div>
 
@@ -350,6 +355,76 @@ export const timeServerPage: Page = {
         }
 
 
+        /**
+         * The keys the responses are signed with, where a client asks for a
+         * signed response - ids, validity and public keys, never a private key
+         * - a new one, beginning a day from now or at once, and one retired.
+         */
+        function signingKeysCard(Keys: SigningKey[]): TemplateResult {
+
+            const notAllowed = mayButNot('read the time server', 'change it');
+
+            return html`
+                <section class="card" id="signing-keys">
+
+                    <h2><i class="fa-solid fa-signature"></i> Signing keys of the responses</h2>
+
+                    ${Keys.length === 0
+                          ? html`<p class="hint" id="no-signing-keys">None: no response is signed.</p>`
+                          : html`
+                              <div class="table-scroll">
+                                  <table class="records signing-keys">
+                                      <thead>
+                                          <tr><th>Id</th><th>Valid from</th><th>Until</th><th></th><th>Public key</th><th></th></tr>
+                                      </thead>
+                                      <tbody>
+                                          ${Keys.map(key => html`
+                                              <tr data-signing-key="${key.id}" class="${key.state === 'signs' ? 'current' : ''}">
+                                                  <td><code>${key.id}</code></td>
+                                                  <td>${key.notBefore !== null ? formatTimestamp(key.notBefore, toTheMinute) : 'always'}</td>
+                                                  <td>${key.notAfter  !== null ? formatTimestamp(key.notAfter,  toTheMinute) : ''}</td>
+                                                  <td>${signingStateChip(key.state)}</td>
+                                                  <td><code class="public-key" title="${key.signatureAlgorithm}, ${key.ellipticCurve}">${key.publicKey}</code></td>
+                                                  <td>${key.state !== 'retired'
+                                                            ? html`<button type="button" class="btn small danger" data-retire="${key.id}" ?disabled=${!mayRotate}
+                                                                           title=${mayRotate ? 'Let it sign nothing from now on, and its public key no longer be handed out' : notAllowed}
+                                                                           @click=${() => void retireSigningKey(key.id)}>Retire</button>`
+                                                            : nothing}</td>
+                                              </tr>
+                                          `)}
+                                      </tbody>
+                                  </table>
+                              </div>
+                          `}
+
+                    <p class="hint">
+                        A client that asks for a signed response learns the public keys from its key exchange. A new
+                        key signs from a day from now on, and its public key is handed out until then, so that the
+                        clients know it when it takes over; a key that may have been read is replaced at once, and
+                        retired.
+                    </p>
+
+                    <div class="form-actions">
+                        <button type="button" class="btn" id="new-signing-key" ?disabled=${!mayRotate}
+                                title=${mayRotate ? 'A new key, signing from a day from now on' : notAllowed}
+                                @click=${() => void newSigningKey(false)}>
+                            <i class="fa-solid fa-plus"></i> New signing key
+                        </button>
+                        <button type="button" class="btn danger" id="new-signing-key-now" ?disabled=${!mayRotate}
+                                title=${mayRotate ? 'A new key, signing from now on' : notAllowed}
+                                @click=${() => void newSigningKey(true)}>
+                            New key, signing at once
+                        </button>
+                        <span id="signing-note"  class="form-notice" role="status"></span>
+                        <span id="signing-error" class="form-error"  role="alert"></span>
+                    </div>
+
+                </section>
+            `;
+
+        }
+
+
         /** What it answered since the program started. */
         function answeredCard(Status: TimeServerStatus): TemplateResult {
 
@@ -438,13 +513,77 @@ export const timeServerPage: Page = {
         }
 
 
-        /** What asking the upstream servers and a new master key came to, each in its two lines. */
+        /**
+         * A new signing key, and what came of it - asked first where it is to
+         * sign at once, as a client that has not made a key exchange since
+         * cannot check what it signs.
+         */
+        async function newSigningKey(AtOnce: boolean): Promise<void> {
+
+            if (AtOnce && !confirm('A new signing key, signing at once? A client that has not made a key exchange since cannot check the responses it signs.'))
+                return;
+
+            signed     = null;
+            signFailed = null;
+            say();
+
+            try
+            {
+                const answer = await whileSaving(content, content.querySelector<HTMLElement>('#signing-note'), () => api.ntsServer.newSigningKey(AtOnce));
+
+                signed = answer.made.state === 'next' && answer.made.notBefore !== null
+                             ? `The new signing key ${answer.made.id} signs from ${formatTimestamp(answer.made.notBefore, toTheMinute)} on; its public key is handed out until then.`
+                             : `The new signing key ${answer.made.id} signs from now on.`;
+
+                await load();
+            }
+            catch (problem)
+            {
+                signFailed = errorMessage(problem);
+            }
+
+            say();
+
+        }
+
+
+        /** Retire a signing key - asked first, as it cannot be taken back. */
+        async function retireSigningKey(Id: number): Promise<void> {
+
+            if (!confirm(`Retire the signing key ${Id}? It signs nothing from now on, and that cannot be taken back.`))
+                return;
+
+            signed     = null;
+            signFailed = null;
+            say();
+
+            try
+            {
+                const answer = await whileSaving(content, content.querySelector<HTMLElement>('#signing-note'), () => api.ntsServer.retireSigningKey(Id));
+
+                signed = `The signing key ${answer.retired.id} signs nothing from now on.`;
+
+                await load();
+            }
+            catch (problem)
+            {
+                signFailed = errorMessage(problem);
+            }
+
+            say();
+
+        }
+
+
+        /** What asking the upstream servers, a new master key and a signing key came to, each in its two lines. */
         function say(): void {
 
             const lines: [ string, string | null ][] = [ [ '#ask-note',    asked        ],
                                                          [ '#ask-error',   askFailed    ],
                                                          [ '#rotate-note', rotated      ],
-                                                         [ '#rotate-error', rotateFailed ] ];
+                                                         [ '#rotate-error', rotateFailed ],
+                                                         [ '#signing-note',  signed       ],
+                                                         [ '#signing-error', signFailed   ] ];
 
             for (const [ selector, text ] of lines)
             {
@@ -564,10 +703,24 @@ export function upstreamLeapWords(Upstream: Pick<UpstreamStatus, 'leapIndicatorA
 
 }
 
+/** What a signing key is now, as a chip says it. */
+export function signingStateChip(State: SigningKey['state']): TemplateResult {
+
+    switch (State)
+    {
+        case 'signs':  return html`<span class="chip on" title="It signs the responses that ask for no key in particular">signs now</span>`;
+        case 'valid':  return html`<span class="muted" title="Another began after it: it signs where a request asks for it by its id">by its id</span>`;
+        case 'next':   return html`<span class="chip" title="Its public key is handed out in the key exchange until it begins">next</span>`;
+        default:       return html`<span class="muted" title="It signs nothing any more">retired</span>`;
+    }
+
+}
+
 /** The names of what was counted, as a line says them. */
 const metricWords: Record<string, string> = {
     ntpRequestsReceived:       'NTP requests',
     ntpResponsesSent:          'NTP answers',
+    ntpSignedResponsesSent:    'NTP answers signed',
     ntpRequestsInvalid:        'NTP requests that were none',
     ntpRequestsRejected:       'NTP requests refused',
     ntpRequestsRateLimited:    'NTP requests over the rate',

@@ -118,8 +118,8 @@ namespace cloud.charging.open.NTSServer
 
         /// <summary>
         /// The directory beside the configuration file the time server keeps its
-        /// own secrets in: the self-signed TLS identity of NTS-KE, and the master
-        /// keys of its cookies.
+        /// own secrets in: the self-signed TLS identity of NTS-KE, the master
+        /// keys of its cookies, and the keys its responses are signed with.
         /// </summary>
         public const                String    DefaultDirectory  = "ntsServer";
 
@@ -318,7 +318,8 @@ namespace cloud.charging.open.NTSServer
                             identity,
                             this.DNSClient,
                             this.Log,
-                            Path.Combine(Directory, TimeServerHost.MasterKeysFileName)
+                            Path.Combine(Directory, TimeServerHost.MasterKeysFileName),
+                            Path.Combine(Directory, SigningKeys.FileName)
                         );
 
             #endregion
@@ -1057,6 +1058,7 @@ namespace cloud.charging.open.NTSServer
                            new JProperty("accounts",      AccountsJSON())
                        )),
                        new JProperty("masterKeys",    MasterKeysJSON()),
+                       new JProperty("signingKeys",   SigningKeysJSON()),
                        new JProperty("clock",         new JObject(
                            new JProperty("now",           now.ToString("o")),
                            new JProperty("base",          Clock.IsFreeRunning ? "free-running" : "system"),
@@ -1145,6 +1147,41 @@ namespace cloud.charging.open.NTSServer
                    new JProperty("notAfter",   Key.NotAfter. ToString("o")),
                    new JProperty("current",    Key.IsCurrent)
                );
+
+        /// <summary>
+        /// The keys the responses are signed with, by their id: their public
+        /// keys and when they are valid, and what each is now - never a private
+        /// key.
+        /// </summary>
+        public JArray SigningKeysJSON()
+
+            => new (Host.SigningKeys.All.Select(SigningKeyJSON));
+
+        /// <summary>
+        /// One signing key, without its private key.
+        /// </summary>
+        public JObject SigningKeyJSON(KeyPair Key)
+
+            => new (
+                   new JProperty("id",                  Key.Id),
+                   new JProperty("publicKey",           Convert.ToBase64String(Key.PublicKey)),
+                   new JProperty("ellipticCurve",       Key.EllipticCurve),
+                   new JProperty("signatureAlgorithm",  Key.SignatureAlgorithm),
+                   new JProperty("notBefore",           Key.NotBefore?.ToString("o")),
+                   new JProperty("notAfter",            Key.NotAfter?. ToString("o")),
+                   new JProperty("state",               Host.SigningKeys.StateOf(Key).ToString().ToLowerInvariant())
+               );
+
+        /// <summary>
+        /// A new signing key as the log and the command line say it: from when
+        /// it signs.
+        /// </summary>
+        public String SigningKeySaid(KeyPair Key)
+
+            => Key.NotBefore is DateTimeOffset begins && begins > Clock.GetUtcNow()
+                   ? String.Create(CultureInfo.InvariantCulture,
+                         $"the new signing key {Key.Id}, which signs from {begins.UtcDateTime:yyyy-MM-dd HH:mm} UTC on - its public key is handed out in the key exchange until then")
+                   : $"the new signing key {Key.Id}, which signs from now on";
 
         private static JObject KeyJSON(String Line)
         {

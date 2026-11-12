@@ -170,6 +170,13 @@ namespace cloud.charging.open.NTSServer
             => server?.MasterKeys ?? [];
 
         /// <summary>
+        /// The keys the responses are signed with, where a client asks for a
+        /// signed response - kept whether a server runs or not, and handed to
+        /// every server made.
+        /// </summary>
+        public SigningKeys                   SigningKeys   { get; }
+
+        /// <summary>
         /// What each login made of NTS-KE over SSH since this program started,
         /// by its name - over every server made since, not only the one running
         /// now.
@@ -190,12 +197,14 @@ namespace cloud.charging.open.NTSServer
         /// <param name="DNSClient">The node's DNS client.</param>
         /// <param name="Log">Where what happens is written.</param>
         /// <param name="MasterKeysFile">Where the master keys of the cookies are kept, in a directory that is the owner's alone; null for in memory only.</param>
+        /// <param name="SigningKeysFile">Where the keys the responses are signed with are kept, in that directory as well; null for in memory only.</param>
         public TimeServerHost(TimeServerSettings  Settings,
                               ServedClock         Clock,
                               NTSKETLSIdentity    Identity,
                               DNSClient           DNSClient,
                               EventLog            Log,
-                              String?             MasterKeysFile   = null)
+                              String?             MasterKeysFile    = null,
+                              String?             SigningKeysFile   = null)
         {
 
             this.Settings        = Settings;
@@ -205,6 +214,7 @@ namespace cloud.charging.open.NTSServer
             this.log             = Log;
             this.AdvertisedNTP   = AdvertisedNTPOf(Settings);
             this.MasterKeysFile  = MasterKeysFile;
+            this.SigningKeys     = SigningKeys.Load(SigningKeysFile, Clock, complaint => Log.Error(complaint, "ntsserver", "keys"));
 
         }
 
@@ -507,6 +517,76 @@ namespace cloud.charging.open.NTSServer
 
         #endregion
 
+        #region NewSigningKeyAsync(AtOnce = false)
+
+        /// <summary>
+        /// A new key to sign the responses with: beginning a day from now, its
+        /// public key handed out in the key exchange until then - or, with
+        /// <paramref name="AtOnce"/>, signing from now on. Kept in the key file,
+        /// and handed to the server running now. Null where the key file could
+        /// not be read.
+        /// </summary>
+        public async Task<KeyPair?> NewSigningKeyAsync(Boolean AtOnce = false)
+        {
+
+            await gate.WaitAsync();
+
+            try
+            {
+
+                if (SigningKeys.New(AtOnce) is not KeyPair made)
+                    return null;
+
+                server?.AddKeyPair(made);
+
+                return made;
+
+            }
+            finally
+            {
+                gate.Release();
+            }
+
+        }
+
+        #endregion
+
+        #region RetireSigningKeyAsync(Id)
+
+        /// <summary>
+        /// Let the signing key of the given id sign nothing from now on, and its
+        /// public key no longer be handed out. Null where there is no such key
+        /// or it is retired already.
+        /// </summary>
+        public async Task<KeyPair?> RetireSigningKeyAsync(UInt16 Id)
+        {
+
+            await gate.WaitAsync();
+
+            try
+            {
+
+                if (SigningKeys.Retire(Id) is not KeyPair retired)
+                    return null;
+
+                if (server is NornNTSServer current)
+                {
+                    current.RemoveKeyPair(Id);
+                    current.AddKeyPair(retired);
+                }
+
+                return retired;
+
+            }
+            finally
+            {
+                gate.Release();
+            }
+
+        }
+
+        #endregion
+
         #region ServeSSHSubsystemAsync(Context, CancellationToken)
 
         /// <summary>
@@ -611,6 +691,12 @@ namespace cloud.charging.open.NTSServer
                            // changes, which in upstream mode is not rare. Every
                            // server made reads the keys the one before it wrote.
                            MasterKeysFilePath:            MasterKeysFile,
+
+                           // Kept here, as Norn keeps them only while one server
+                           // runs: a client that learnt a public key from a key
+                           // exchange goes on checking its responses by it.
+                           KeyPairs:                      SigningKeys.All,
+                           PublicKeyLeadTime:             SigningKeys.LeadTime,
 
                            TLSCertificate:                Identity.Certificate,
                            TLSPrivateKey:                 Identity.PrivateKey,
@@ -759,6 +845,7 @@ namespace cloud.charging.open.NTSServer
             return new JObject(
                        new JProperty("ntpRequestsReceived",       metrics.NTPRequestsReceived),
                        new JProperty("ntpResponsesSent",          metrics.NTPResponsesSent),
+                       new JProperty("ntpSignedResponsesSent",    metrics.NTPSignedResponsesSent),
                        new JProperty("ntpRequestsInvalid",        metrics.NTPRequestsInvalid),
                        new JProperty("ntpRequestsRejected",       metrics.NTPRequestsRejected),
                        new JProperty("ntpRequestsRateLimited",    metrics.NTPRequestsRateLimited),

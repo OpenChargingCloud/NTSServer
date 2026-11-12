@@ -179,6 +179,35 @@ export interface MasterKeyRotation {
     masterKeys:  MasterKey[];
 }
 
+/**
+ * One key the responses are signed with: its public key and when it is valid -
+ * never its private key. "signs" signs a response that asks for no key in
+ * particular; "valid" only one that asks for it by its id; "next" has not
+ * begun, and its public key is handed out in the key exchange beforehand;
+ * "retired" signs nothing any more.
+ */
+export interface SigningKey {
+    id:                  number;
+    publicKey:           string;
+    ellipticCurve:       string;
+    signatureAlgorithm:  string;
+    notBefore:           string | null;
+    notAfter:            string | null;
+    state:               'signs' | 'valid' | 'next' | 'retired';
+}
+
+/** What a new signing key answers: POST /ntsServer/signingKeys. */
+export interface SigningKeyMade {
+    made:         SigningKey;
+    signingKeys:  SigningKey[];
+}
+
+/** What a signing key retired answers: POST /ntsServer/signingKeys/retire. */
+export interface SigningKeyRetired {
+    retired:      SigningKey;
+    signingKeys:  SigningKey[];
+}
+
 /** How the time server stands: GET /ntsServer. */
 export interface TimeServerStatus {
     timeSource:    TimeSource;
@@ -195,7 +224,9 @@ export interface TimeServerStatus {
                      accounts: SSHAccount[] };
     /** The master keys of the cookies, oldest first. None while nothing is answered. */
     masterKeys:    MasterKey[];
-    clock:         { now: string; base: 'free-running' | 'system'; correctionMs: number; frequencyPPM: number;
+    /** The keys the responses are signed with, by their id - retired ones among them. */
+    signingKeys:   SigningKey[];
+    clock:        { now: string; base: 'free-running' | 'system'; correctionMs: number; frequencyPPM: number;
                      /** The leap seconds made since the start, added up. */
                      leapSeconds: number;
                      /** The leap second scheduled and not yet made. */
@@ -337,7 +368,9 @@ export const api = {
         sync:      ()                   => request<UpstreamStatus>     ('POST', '/ntsServer/sync', undefined, roundWithin),
         ssh:       ()                   => request<KeyExchangeOverSSH> ('GET',  '/ntsServer/ssh'),
         setSSH:    (change: SSHChange)  => request<KeyExchangeOverSSH> ('PUT',  '/ntsServer/ssh', change),
-        rotateMasterKey: (forget: boolean) => request<MasterKeyRotation>('POST', '/ntsServer/masterKeys/rotate', { forget })
+        rotateMasterKey: (forget: boolean) => request<MasterKeyRotation>('POST', '/ntsServer/masterKeys/rotate', { forget }),
+        newSigningKey:    (atOnce: boolean) => request<SigningKeyMade>   ('POST', '/ntsServer/signingKeys', { atOnce }),
+        retireSigningKey: (id: number)      => request<SigningKeyRetired>('POST', '/ntsServer/signingKeys/retire', { id })
     }
 
 };

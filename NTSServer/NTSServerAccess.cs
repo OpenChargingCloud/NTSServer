@@ -52,7 +52,8 @@ namespace cloud.charging.open.NTSServer
         /// The time server: read, its listeners, its time source, how far it
         /// is from its upstream servers, how many it answered and when each NTS
         /// client was last served; edited, its settings, the NTS clients it lets
-        /// in over SSH and the master keys of its cookies.
+        /// in over SSH, the master keys of its cookies and the keys its
+        /// responses are signed with.
         /// </summary>
         public const String  TimeServer   = "timeserver";
 

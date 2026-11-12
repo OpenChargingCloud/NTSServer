@@ -122,7 +122,11 @@ namespace cloud.charging.open.NTSServer.CommandLine
                 $"master key      " + (host.CurrentMasterKeyId is UInt64 current
                                            ? $"{current}, of {host.MasterKeys.Count} kept - see '{MasterKeysCommand.CommandName}'"
                                            : "none - nothing is answered"),
-                $"answered        {metrics.NTPResponsesSent} NTP response(s) to {metrics.NTPRequestsReceived} request(s), " +
+                $"signing key     " + (host.SigningKeys.Current is KeyPair signing
+                                           ? $"{signing.Id}, of {host.SigningKeys.All.Count} kept - see '{SigningKeysCommand.CommandName}'"
+                                           : $"none - no response is signed; see '{SigningKeysCommand.CommandName}'"),
+                $"answered        {metrics.NTPResponsesSent} NTP response(s) to {metrics.NTPRequestsReceived} request(s)" +
+                                  (metrics.NTPSignedResponsesSent > 0 ? $" ({metrics.NTPSignedResponsesSent} signed)" : "") + ", " +
                                   $"{metrics.NTSKEResponsesSent} key exchange(s) of {metrics.NTSKEConnectionsAccepted} connection(s)" +
                                   (metrics.NTPRequestsInvalid > 0 || metrics.NTSKEHandshakeFailures > 0
                                        ? $"; {metrics.NTPRequestsInvalid} invalid NTP request(s), {metrics.NTSKEHandshakeFailures} failed handshake(s)"

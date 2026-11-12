@@ -179,6 +179,7 @@ namespace cloud.charging.open.NTSServer.Tests
                 Assert.That(lines, Has.Some.EqualTo($"                SHA-256 {node.Host.Identity.Fingerprint}"));
                 Assert.That(lines, Has.Some.StartsWith($"NTP             UDP 127.0.0.1:{node.Settings.NTPPort}"));
                 Assert.That(lines, Has.Some.StartsWith($"master key      {node.Host.CurrentMasterKeyId}, of 1 kept"));
+                Assert.That(lines, Has.Some.EqualTo("signing key     1, of 1 kept - see 'signingKeys'"));
                 Assert.That(lines, Has.None.StartsWith("upstream"), "a server in local mode follows nobody");
             });
 

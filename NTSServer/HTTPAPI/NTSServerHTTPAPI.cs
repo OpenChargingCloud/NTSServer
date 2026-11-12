@@ -43,6 +43,8 @@ namespace cloud.charging.open.NTSServer
     ///   <item>GET  /api/v1/ntsServer/ssh         - NTS-KE over SSH, the NTS clients with their keys, and what each login made of it since the start.</item>
     ///   <item>PUT  /api/v1/ntsServer/ssh         - { "enabled", "clients": [ { "name", "keys", "enabled" } ] }: NTS-KE over SSH, and who may use it.</item>
     ///   <item>POST /api/v1/ntsServer/masterKeys/rotate - { "forget" }: seal the cookies with a new master key from now on, and forget the earlier ones at once where asked.</item>
+    ///   <item>POST /api/v1/ntsServer/signingKeys        - { "atOnce" }: a new key to sign the responses with, beginning a day from now or at once.</item>
+    ///   <item>POST /api/v1/ntsServer/signingKeys/retire - { "id" }: the signing key signs nothing from now on.</item>
     /// </list>
     /// </remarks>
     public class NTSServerHTTPAPI : NodeHTTPAPI
@@ -89,6 +91,8 @@ namespace cloud.charging.open.NTSServer
             AddHandler(root + "/ssh",       GetSSH,       HTTPMethod.GET);
             AddHandler(root + "/ssh",       PutSSH,       HTTPMethod.PUT);
             AddHandler(root + "/masterKeys/rotate", PostRotateMasterKey, HTTPMethod.POST);
+            AddHandler(root + "/signingKeys",        PostNewSigningKey,    HTTPMethod.POST);
+            AddHandler(root + "/signingKeys/retire", PostRetireSigningKey, HTTPMethod.POST);
 
         }
 
@@ -303,6 +307,90 @@ namespace cloud.charging.open.NTSServer
                                                                                 new JProperty("forgotten",   forget),
                                                                                 new JProperty("masterKeys",  NTSServer.MasterKeysJSON())
                                                                             )));
+
+        }
+
+        #endregion
+
+        #region (private) PostNewSigningKey(Request)
+
+        /// <summary>
+        /// A new key to sign the responses with, as the command line's
+        /// "signingKeys new": beginning a day from now, so that the clients
+        /// learn its public key from a key exchange before it signs - or, with
+        /// { "atOnce": true }, signing from now on, for a key that may have been
+        /// read. Answered with the new key and every key kept - never a private
+        /// key.
+        /// </summary>
+        private async Task<HTTPResponse> PostNewSigningKey(HTTPRequest Request)
+        {
+
+            if (!TryAuthorize(Request, Permission.Edit(NTSServerAccess.TimeServer), true, out var user, out var refused))
+                return refused;
+
+            var atOnce = false;
+
+            if (!String.IsNullOrWhiteSpace(Request.HTTPBodyAsUTF8String))
+            {
+
+                if (!TryParseJSONObject(Request, out var json, out var badRequest))
+                    return badRequest;
+
+                if (json["atOnce"] is JToken atOnceToken && atOnceToken.Type != JTokenType.Null)
+                {
+
+                    if (atOnceToken.Type != JTokenType.Boolean)
+                        return ErrorJSON(Request, HTTPStatusCode.BadRequest, "\"atOnce\" is true or false.");
+
+                    atOnce = atOnceToken.Value<Boolean>();
+
+                }
+
+            }
+
+            if (await NTSServer.Host.NewSigningKeyAsync(atOnce) is not KeyPair made)
+                return ErrorJSON(Request, HTTPStatusCode.Conflict, $"The signing keys in '{NTSServer.Host.SigningKeys.File}' could not be read, so no key is added to them.");
+
+            Log.Notice($"'{user.Id}' made {NTSServer.SigningKeySaid(made)}.", "ntsserver", "keys");
+
+            return JSONResponse(Request, HTTPStatusCode.OK, new JObject(
+                                                                new JProperty("made",         NTSServer.SigningKeyJSON(made)),
+                                                                new JProperty("signingKeys",  NTSServer.SigningKeysJSON())
+                                                            ));
+
+        }
+
+        #endregion
+
+        #region (private) PostRetireSigningKey(Request)
+
+        /// <summary>
+        /// Let a signing key sign nothing from now on, and its public key no
+        /// longer be handed out - { "id": 3 } - as the command line's
+        /// "signingKeys retire 3". Answered with the key and every key kept.
+        /// </summary>
+        private async Task<HTTPResponse> PostRetireSigningKey(HTTPRequest Request)
+        {
+
+            if (!TryAuthorize(Request, Permission.Edit(NTSServerAccess.TimeServer), true, out var user, out var refused))
+                return refused;
+
+            if (!TryParseJSONObject(Request, out var json, out var badRequest))
+                return badRequest;
+
+            if (json["id"] is not JToken idToken || idToken.Type != JTokenType.Integer ||
+                idToken.Value<Int64>() is var id && (id < 1 || id > UInt16.MaxValue))
+                return ErrorJSON(Request, HTTPStatusCode.BadRequest, "\"id\" is the id of a signing key, from 1 to 65535.");
+
+            if (await NTSServer.Host.RetireSigningKeyAsync((UInt16) id) is not KeyPair retired)
+                return ErrorJSON(Request, HTTPStatusCode.NotFound, $"There is no signing key {id} that is not retired already.");
+
+            Log.Notice($"'{user.Id}' retired the signing key {retired.Id}: it signs nothing from now on, and its public key is no longer handed out.", "ntsserver", "keys");
+
+            return JSONResponse(Request, HTTPStatusCode.OK, new JObject(
+                                                                new JProperty("retired",      NTSServer.SigningKeyJSON(retired)),
+                                                                new JProperty("signingKeys",  NTSServer.SigningKeysJSON())
+                                                            ));
 
         }
 

@@ -155,3 +155,18 @@ table.records.nts-accounts .client-activity {
 table.records.master-keys tr.current td {
     font-weight: 600;
 }
+
+// The signing key that signs the responses asking for no key in particular,
+// and the public keys: long, and broken anywhere rather than widening the table.
+table.records.signing-keys {
+
+    tr.current td {
+        font-weight: 600;
+    }
+
+    code.public-key {
+        word-break: break-all;
+        font-size: 0.8em;
+    }
+
+}
