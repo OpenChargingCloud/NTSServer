@@ -17,14 +17,13 @@
 
 #region Usings
 
-using System.Text;
-
 using Newtonsoft.Json.Linq;
 
 using org.GraphDefined.Vanaheimr.Hermod.SSH;
 using org.GraphDefined.Vanaheimr.Hermod.SSH.Client;
 
 using cloud.charging.open.protocols.WWCP.Node;
+using cloud.charging.open.protocols.WWCP.Node.TestKit;
 
 using cloud.charging.open.NTSServer.CommandLine;
 
@@ -64,77 +63,15 @@ namespace cloud.charging.open.NTSServer.Tests
 
         #endregion
 
-        #region (private sealed class) Screen
-
-        /// <summary>
-        /// What a shell over SSH writes, as it arrives.
-        /// </summary>
-        private sealed class Screen
-        {
-
-            private readonly StringBuilder  received  = new ();
-            private readonly Lock           padlock   = new ();
-
-            public Screen(SshClientShell Shell)
-
-                => _ = Task.Run(async () => {
-
-                       var buffer = new Byte[4096];
-
-                       try
-                       {
-                           Int32 read;
-                           while ((read = await Shell.Output.ReadAsync(buffer)) > 0)
-                               lock (padlock) { received.Append(Encoding.UTF8.GetString(buffer, 0, read)); }
-                       }
-                       catch { }
-
-                   });
-
-            public String Text
-            {
-                get { lock (padlock) { return received.ToString(); } }
-            }
-
-            /// <summary>
-            /// Wait until the given text was written after what was there when
-            /// Since was taken, and return what was written since.
-            /// </summary>
-            public async Task<String> WaitFor(String What, Int32 Since = 0, Int32 Seconds = 10)
-            {
-
-                var until = DateTime.UtcNow.AddSeconds(Seconds);
-
-                while (DateTime.UtcNow < until)
-                {
-
-                    var text = Text;
-
-                    if (text.IndexOf(What, Math.Min(Since, text.Length), StringComparison.Ordinal) >= 0)
-                        return text[Math.Min(Since, text.Length)..];
-
-                    await Task.Delay(20);
-
-                }
-
-                Assert.Fail($"Waited in vain for '{What}'. The session said:\n{Text}");
-                return "";
-
-            }
-
-        }
-
-        #endregion
-
         #region (private static) Shell(Node, Account, Role = null)
 
         /// <summary>
         /// A shell over SSH, signed in as the given account - made, in the given
         /// role, where it is not root - with a key of its own, at its prompt.
         /// </summary>
-        private static async Task<(SshClient Client, SshClientShell Shell, Screen Screen)> Shell(NTSServerNode  Node,
-                                                                                                 String         Account,
-                                                                                                 String?        Role = null)
+        private static async Task<(SshClient Client, SSHScreen Screen)> Shell(NTSServerNode  Node,
+                                                                              String         Account,
+                                                                              String?        Role = null)
         {
 
             if (Role is not null)
@@ -147,11 +84,11 @@ namespace cloud.charging.open.NTSServer.Tests
 
             var client = await ConnectOverSSH(Node, Account, key);
             var shell  = await client.OpenShellAsync(new SshPty("xterm", new SshWindowSize(160, 40), new Dictionary<Byte, UInt32>()));
-            var screen = new Screen(shell);
+            var screen = new SSHScreen(shell, $"nts:{Node.HTTPPort}> ");
 
-            await screen.WaitFor($"nts:{Node.HTTPPort}> ");
+            await screen.AtPrompt();
 
-            return (client, shell, screen);
+            return (client, screen);
 
         }
 
@@ -355,18 +292,12 @@ namespace cloud.charging.open.NTSServer.Tests
         {
 
             var node                     = await Started();
-            var (client, shell, screen)  = await Shell(node, WWCPNode.DefaultAdminUser);
+            var (client, screen)         = await Shell(node, WWCPNode.DefaultAdminUser);
 
             await using (client)
             {
 
-                var mark = screen.Text.Length;
-                await shell.WriteAsync("timeServer\r");
-
-                // Not the prompt: it is drawn anew with every key typed, and
-                // so is there before timeServer has said anything. "answered"
-                // is its last line, and nothing typed echoes it.
-                var said = await screen.WaitFor("answered        ", mark);
+                var said = await screen.Run("timeServer");
 
                 Assert.That(said, Does.Contain("time source     this machine's clock").
                                   And.Contain($"SHA-256 {node.Host.Identity.Fingerprint}"));
@@ -390,20 +321,13 @@ namespace cloud.charging.open.NTSServer.Tests
 
             var node                     = await Started();
             var before                   = node.Host.CurrentMasterKeyId;
-            var (client, shell, screen)  = await Shell(node, "olga", NTSServerAccess.Operator.Name);
+            var (client, screen)         = await Shell(node, "olga", NTSServerAccess.Operator.Name);
 
             await using (client)
             {
 
-                var mark = screen.Text.Length;
-                await shell.WriteAsync("masterKeys\r");
-
-                Assert.That(await screen.WaitFor("seals the cookies made now", mark), Does.Contain("1 master key(s)"));
-
-                mark = screen.Text.Length;
-                await shell.WriteAsync("masterKeys rotate\r");
-
-                Assert.That(await screen.WaitFor("may not do that here", mark), Does.Contain("'olga' may not do that here: it needs the"));
+                Assert.That(await screen.Run("masterKeys"),         Does.Contain("1 master key(s)"));
+                Assert.That(await screen.Run("masterKeys rotate"),  Does.Contain("'olga' may not do that here: it needs the"));
                 Assert.That(node.Host.CurrentMasterKeyId, Is.EqualTo(before), "an operator rotated the master key");
 
             }

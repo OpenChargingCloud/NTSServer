@@ -450,20 +450,13 @@ namespace cloud.charging.open.NTSServer.Tests
         {
 
             var node                     = await Started();
-            var (client, shell, screen)  = await Shell(node, "olga", NTSServerAccess.Operator.Name);
+            var (client, screen)         = await Shell(node, "olga", NTSServerAccess.Operator.Name);
 
             await using (client)
             {
 
-                var mark = screen.Text.Length;
-                await shell.WriteAsync("signingKeys\r");
-
-                Assert.That(await screen.WaitFor("signs now", mark), Does.Contain("1 signing key(s)"));
-
-                mark = screen.Text.Length;
-                await shell.WriteAsync("signingKeys new\r");
-
-                Assert.That(await screen.WaitFor("may not do that here", mark), Does.Contain("'olga' may not do that here: it needs the"));
+                Assert.That(await screen.Run("signingKeys"),      Does.Contain("1 signing key(s)"));
+                Assert.That(await screen.Run("signingKeys new"),  Does.Contain("'olga' may not do that here: it needs the"));
                 Assert.That(node.Host.SigningKeys.All, Has.Count.EqualTo(1), "an operator made a signing key");
 
             }
