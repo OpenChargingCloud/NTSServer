@@ -363,7 +363,10 @@ namespace cloud.charging.open.NTSServer.Tests
                 var mark = screen.Text.Length;
                 await shell.WriteAsync("timeServer\r");
 
-                var said = await screen.WaitFor($"nts:{node.HTTPPort}> ", mark);
+                // Not the prompt: it is drawn anew with every key typed, and
+                // so is there before timeServer has said anything. "answered"
+                // is its last line, and nothing typed echoes it.
+                var said = await screen.WaitFor("answered        ", mark);
 
                 Assert.That(said, Does.Contain("time source     this machine's clock").
                                   And.Contain($"SHA-256 {node.Host.Identity.Fingerprint}"));
