@@ -19,6 +19,7 @@
 
 using System.Net;
 using System.Net.Sockets;
+using IPPort = org.GraphDefined.Vanaheimr.Hermod.IPPort;
 
 #endregion
 
@@ -40,7 +41,7 @@ namespace cloud.charging.open.NTSServer.Tests
 
         private static readonly HashSet<Int32> handedOut = [];
 
-        public static Int32 Free()
+        public static IPPort Free()
         {
 
             lock (handedOut)
@@ -49,9 +50,9 @@ namespace cloud.charging.open.NTSServer.Tests
                 {
 
                     using var udp  = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
-                    var port       = ((IPEndPoint) udp.Client.LocalEndPoint!).Port;
+                    var port       = IPPort.Parse(((IPEndPoint) udp.Client.LocalEndPoint!).Port);
 
-                    if (handedOut.Add(port))
+                    if (handedOut.Add(port.ToInt32()))
                         return port;
 
                 }

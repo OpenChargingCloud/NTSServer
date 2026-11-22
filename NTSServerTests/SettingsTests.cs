@@ -140,14 +140,14 @@ namespace cloud.charging.open.NTSServer.Tests
         [TestCase(null,            1123,  "ntp.lan",    "udp://ntp.lan:1123")]
         [TestCase("time.lan",      123,   "ntp.lan:99", "udp://ntp.lan:99")]
         public void TheKeyExchangeNamesNTPWhereAClientCouldNotGuessIt(String?  Hostname,
-                                                                      Int32    NTPPort,
+                                                                      IPPort    NTPPort,
                                                                       String?  NTPServer,
                                                                       String?  Named)
         {
 
             var settings = TimeServerSettings.Default with {
                                Hostname   = Hostname,
-                               NTPPort    = IPPort.Parse(NTPPort),
+                               NTPPort    = NTPPort,
                                NTPServer  = NTPServer
                            };
 

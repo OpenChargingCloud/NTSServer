@@ -757,7 +757,7 @@ namespace cloud.charging.open.NTSServer
 
             var name = Exchange.Session.Username;
 
-            sshActivity.AddOrUpdate(name,
+            sshActivity.AddOrUpdate(name.ToString(),
                                     _        => NTSClientActivity.None.With(Exchange),
                                     (_, was) => was.With(Exchange));
 

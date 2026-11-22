@@ -19,6 +19,7 @@
 
 using System.Collections.Concurrent;
 
+using org.GraphDefined.Vanaheimr.Illias;
 using org.GraphDefined.Vanaheimr.Hermod.SSH;
 
 using cloud.charging.open.protocols.WWCP.Node.Logging;
@@ -178,9 +179,9 @@ namespace cloud.charging.open.NTSServer.SecureShell
         /// <summary>
         /// Whether the name is an NTS client - let in or not.
         /// </summary>
-        public Boolean Knows(String Username)
+        public Boolean Knows(User_Id Username)
 
-            => clients.ContainsKey(Username);
+            => clients.ContainsKey(Username.ToString());
 
         #endregion
 
@@ -189,7 +190,7 @@ namespace cloud.charging.open.NTSServer.SecureShell
         public ValueTask<Boolean> AuthorizePublicKeyAsync(SshPublicKeyAuthRequest  Request,
                                                           CancellationToken        CancellationToken = default)
 
-            => ValueTask.FromResult(WhyNotLetIn(Request.Username, Request.PublicKeyBlob, Saying: true) is null);
+            => ValueTask.FromResult(WhyNotLetIn(Request.Username.ToString(), Request.PublicKeyBlob, Saying: true) is null);
 
         #endregion
 
@@ -203,7 +204,7 @@ namespace cloud.charging.open.NTSServer.SecureShell
                                                                       CancellationToken        CancellationToken = default)
 
             => ValueTask.FromResult(
-                   FindKey(Request.Username, Request.PublicKeyBlob)?.Restrictions
+                   FindKey(Request.Username.ToString(), Request.PublicKeyBlob)?.Restrictions
                        ?? SshSessionRestrictions.None
                );
 
@@ -214,7 +215,7 @@ namespace cloud.charging.open.NTSServer.SecureShell
         /// <summary>
         /// NTS-KE over SSH while it is served, and nothing otherwise.
         /// </summary>
-        public IReadOnlySet<String> SubsystemsFor(String Username)
+        public IReadOnlySet<String> SubsystemsFor(User_Id Username)
 
             => served()
                    ? new HashSet<String> { Subsystem }
@@ -224,7 +225,7 @@ namespace cloud.charging.open.NTSServer.SecureShell
         /// "ntsclients", which is what "group:ntsclients" in the SSH access
         /// rules means.
         /// </summary>
-        public IReadOnlyList<String> GroupsOf(String Username)
+        public IReadOnlyList<String> GroupsOf(User_Id Username)
 
             => [ "ntsclients" ];
 
@@ -238,7 +239,7 @@ namespace cloud.charging.open.NTSServer.SecureShell
             if (Session.PublicKeyBlob is not Byte[] key)
                 return $"the NTS client '{Session.Username}' did not sign in with an SSH key";
 
-            return WhyNotLetIn(Session.Username, key, Saying: false);
+            return WhyNotLetIn(Session.Username.ToString(), key, Saying: false);
 
         }
 

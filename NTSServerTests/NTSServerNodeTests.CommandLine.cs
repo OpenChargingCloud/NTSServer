@@ -19,6 +19,7 @@
 
 using Newtonsoft.Json.Linq;
 
+using org.GraphDefined.Vanaheimr.Illias;
 using org.GraphDefined.Vanaheimr.Hermod.SSH;
 using org.GraphDefined.Vanaheimr.Hermod.SSH.Client;
 
@@ -69,21 +70,21 @@ namespace cloud.charging.open.NTSServer.Tests
         /// A shell over SSH, signed in as the given account - made, in the given
         /// role, where it is not root - with a key of its own, at its prompt.
         /// </summary>
-        private static async Task<(SshClient Client, SSHScreen Screen)> Shell(NTSServerNode  Node,
+        private static async Task<(SSHClient Client, SSHScreen Screen)> Shell(NTSServerNode  Node,
                                                                               String         Account,
                                                                               String?        Role = null)
         {
 
             if (Role is not null)
-                (await AccountWithPassword(Node, Account, Role)).Dispose();
+                (await AccountWithPassword(Node, User_Id.Parse(Account), Role)).Dispose();
 
             var key    = SshHostKey.GenerateEd25519();
-            var added  = await Node.AuthorizeSSHKey(Account, SshPublicKey.FromHostKey(key).ToAuthorizedKeyLine());
+            var added  = await Node.AuthorizeSSHKey(User_Id.Parse(Account), SshPublicKey.FromHostKey(key).ToAuthorizedKeyLine());
 
             Assert.That(added.IsAdded, Is.True, added.Reason);
 
             var client = await ConnectOverSSH(Node, Account, key);
-            var shell  = await client.OpenShellAsync(new SshPty("xterm", new SshWindowSize(160, 40), new Dictionary<Byte, UInt32>()));
+            var shell  = await client.OpenShell(new SshPty("xterm", new SshWindowSize(160, 40), new Dictionary<Byte, UInt32>()));
             var screen = new SSHScreen(shell, $"nts:{Node.HTTPPort}> ");
 
             await screen.AtPrompt();
@@ -292,7 +293,7 @@ namespace cloud.charging.open.NTSServer.Tests
         {
 
             var node                     = await Started();
-            var (client, screen)         = await Shell(node, WWCPNode.DefaultAdminUser);
+            var (client, screen)         = await Shell(node, WWCPNode.DefaultAdminUser.ToString());
 
             await using (client)
             {

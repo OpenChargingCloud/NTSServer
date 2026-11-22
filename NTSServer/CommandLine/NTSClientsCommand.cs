@@ -284,7 +284,7 @@ namespace cloud.charging.open.NTSServer.CommandLine
 
             // Accounts allowed to run "ntske" are no NTS clients, but are served all the same.
             foreach (var account in node.Host.SSHActivity.
-                                        Where  (activity => !node.SSHClients.Knows(activity.Key)).
+                                        Where  (activity => !(User_Id.TryParse(activity.Key) is User_Id client && node.SSHClients.Knows(client))).
                                         OrderBy(activity => activity.Key, StringComparer.OrdinalIgnoreCase))
             {
                 lines.Add($"{account.Key} (an account of this {node.Kind.Name})");

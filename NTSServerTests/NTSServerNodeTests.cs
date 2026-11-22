@@ -108,8 +108,8 @@ namespace cloud.charging.open.NTSServer.Tests
 
             var section   = new JObject(
                                 new JProperty("listen",     "127.0.0.1"),
-                                new JProperty("ntsKEPort",  TestPorts.Free()),
-                                new JProperty("ntpPort",    UDPPorts.Free()),
+                                new JProperty("ntsKEPort",  TestPorts.Free().ToUInt16()),
+                                new JProperty("ntpPort",    UDPPorts.Free().ToUInt16()),
                                 new JProperty("hostname",   "localhost")
                             );
 
@@ -123,13 +123,13 @@ namespace cloud.charging.open.NTSServer.Tests
             File.WriteAllText(file, configuration.ToString());
 
             var node = new NTSServerNode(
-                           HTTPPort:          IPPort.Parse(TestPorts.Free()),
+                           HTTPPort:          TestPorts.Free(),
                            AccountsPath:      Path.Combine(directory, "accounts"),
                            ConfigFile:        new WWCPConfigFile(file),
                            CertificatesPath:  Path.Combine(directory, "certificates"),
                            LogToConsole:      false,
                            BridgeDebugLog:    false,
-                           SSH:               new SSHSettings(Enabled: true, Port: IPPort.Parse(TestPorts.Free())),
+                           SSH:               new SSHSettings(Enabled: true, Port: TestPorts.Free()),
                            Clock:             Clock,
                            CommandLine:       CommandLine
                        );
@@ -172,15 +172,15 @@ namespace cloud.charging.open.NTSServer.Tests
 
         #region (private static) ConnectOverSSH(Node, Username, Key)
 
-        private static Task<SshClient> ConnectOverSSH(NTSServerNode  Node,
+        private static Task<SSHClient> ConnectOverSSH(NTSServerNode  Node,
                                                       String         Username,
                                                       ISshHostKey    Key)
 
-            => SshClient.ConnectAsync(
+            => SSHClient.Connect(
                    "127.0.0.1",
-                   Node.SSHPort!.Value.ToUInt16(),
-                   new SshClientOptions {
-                       Username       = Username,
+                   Node.SSHPort!.Value,
+                   new SSHClientOptions {
+                       Username       = User_Id.Parse(Username),
                        Credentials    = [ Key ],
                        // Pinned: over SSH the host key is the whole of the server's authentication.
                        VerifyHostKey  = blob => Node.SSHHostKey is String hostKey &&
@@ -241,7 +241,7 @@ namespace cloud.charging.open.NTSServer.Tests
 
             // Again in the same directory, on the same configuration file.
             var again = new NTSServerNode(
-                            HTTPPort:          IPPort.Parse(TestPorts.Free()),
+                            HTTPPort:          TestPorts.Free(),
                             AccountsPath:      Path.Combine(directory, "accounts"),
                             ConfigFile:        new WWCPConfigFile(first.ConfigFile.Path),
                             CertificatesPath:  Path.Combine(directory, "certificates"),
@@ -290,11 +290,11 @@ namespace cloud.charging.open.NTSServer.Tests
             // Again on the same NTP port; the key exchange on another one, as
             // the client makes none.
             var configuration = JObject.Parse(File.ReadAllText(configFile));
-            configuration[TimeServerSettings.SectionName]!["ntsKEPort"] = TestPorts.Free();
+            configuration[TimeServerSettings.SectionName]!["ntsKEPort"] = TestPorts.Free().ToUInt16();
             File.WriteAllText(configFile, configuration.ToString());
 
             var again = new NTSServerNode(
-                            HTTPPort:          IPPort.Parse(TestPorts.Free()),
+                            HTTPPort:          TestPorts.Free(),
                             AccountsPath:      Path.Combine(directory, "accounts"),
                             ConfigFile:        new WWCPConfigFile(configFile),
                             CertificatesPath:  Path.Combine(directory, "certificates"),
@@ -734,7 +734,7 @@ namespace cloud.charging.open.NTSServer.Tests
         /// HTTP Basic Auth, as the JSON API takes it.
         /// </summary>
         private static async Task<HttpClient> AccountWithPassword(NTSServerNode  Node,
-                                                                  String         Name,
+                                                                  User_Id        Name,
                                                                   String         Role)
         {
 
@@ -743,8 +743,8 @@ namespace cloud.charging.open.NTSServer.Tests
             Assert.That(Node.ExtAPI.TryGetOrganization(Organization_Id.Parse(Node.Kind.Organization), out var organization) &&
                         organization is Organization, Is.True, "the node's organization is not there");
 
-            await Node.ExtAPI.CreateUser(User_Id.Parse(Name),
-                                         I18NString.Create(Languages.en, Name),
+            await Node.ExtAPI.CreateUser(Name,
+                                         I18NString.Create(Languages.en, Name.ToString()),
                                          SimpleEMailAddress.Parse($"{Name}@localhost"),
                                          User2OrganizationEdgeLabel.IsMember,
                                          (Organization) organization!,
@@ -755,7 +755,7 @@ namespace cloud.charging.open.NTSServer.Tests
                                          AcceptedEULA:              DateTimeOffset.UtcNow.AddSeconds(-1),
                                          IsAuthenticated:           true);
 
-            Assert.That(Node.ExtAPI.TryGetUser     (User_Id.     Parse(Name), out var user),  Is.True, $"the account '{Name}' was not made");
+            Assert.That(Node.ExtAPI.TryGetUser     (User_Id.     Parse(Name.ToString()), out var user),  Is.True, $"the account '{Name}' was not made");
             Assert.That(Node.ExtAPI.TryGetUserGroup(UserGroup_Id.Parse(Role), out var group) &&
                         group is UserGroup, Is.True, $"the node has no group '{Role}'");
 
@@ -809,7 +809,7 @@ namespace cloud.charging.open.NTSServer.Tests
             Assert.That(node.Host.CurrentMasterKeyId, Is.EqualTo(before));
 
             // An operator, who may read the time server but not change it: nothing rotated.
-            using var operatorHTTP = await AccountWithPassword(node, "operator1", NTSServerAccess.Operator.Name);
+            using var operatorHTTP = await AccountWithPassword(node, User_Id.Parse("operator1"), NTSServerAccess.Operator.Name);
 
             var reader   = await operatorHTTP.PostAsync(url, JSON("{}"));
 
@@ -887,9 +887,9 @@ namespace cloud.charging.open.NTSServer.Tests
         {
 
             using var taken = new System.Net.Sockets.UdpClient(new IPEndPoint(System.Net.IPAddress.Loopback, 0));
-            var port        = ((IPEndPoint) taken.Client.LocalEndPoint!).Port;
+            var port        = IPPort.Parse(((IPEndPoint) taken.Client.LocalEndPoint!).Port);
 
-            var problem     = await Assert.ThrowsAsync<PortUnavailableException>(async () => await Started(new JObject(new JProperty("ntpPort", port))));
+            var problem     = await Assert.ThrowsAsync<PortUnavailableException>(async () => await Started(new JObject(new JProperty("ntpPort", port.ToUInt16()))));
 
             Assert.That(problem!.Whose, Is.EqualTo(TimeServerHost.NTPPort));
 
@@ -1121,8 +1121,8 @@ namespace cloud.charging.open.NTSServer.Tests
                                          new JProperty("servers", new JArray(
                                              new JObject(
                                                  new JProperty("hostname",   "localhost"),
-                                                 new JProperty("ntsKEPort",  TestPorts.Free()),
-                                                 new JProperty("ntpPort",    UDPPorts.Free())
+                                                 new JProperty("ntsKEPort",  TestPorts.Free().ToUInt16()),
+                                                 new JProperty("ntpPort",    UDPPorts.Free().ToUInt16())
                                              )
                                          )),
                                          new JProperty("minServers", 1)
@@ -1209,12 +1209,12 @@ namespace cloud.charging.open.NTSServer.Tests
             var ntsKE    = TestPorts.Free();
             var ntp      = UDPPorts.Free();
 
-            var change   = await node.ChangeSettingsAsync(new JObject(new JProperty("ntsKEPort", ntsKE), new JProperty("ntpPort", ntp)), "tester");
+            var change   = await node.ChangeSettingsAsync(new JObject(new JProperty("ntsKEPort", ntsKE.ToUInt16()), new JProperty("ntpPort", ntp.ToUInt16())), "tester");
 
             Assert.That(change.IsDone,                     Is.True, change.NotApplied ?? change.Refused ?? change.NotSaved);
             Assert.That(change.Changed,                    Is.EquivalentTo(new[] { "ntsKEPort", "ntpPort" }));
             Assert.That(change.Notes,                      Has.Some.Contains($"NTS-KE on TCP {ntsKE}, NTP on UDP {ntp}"));
-            Assert.That(node.Settings.NTSKEPort.ToUInt16(), Is.EqualTo(ntsKE));
+            Assert.That(node.Settings.NTSKEPort, Is.EqualTo(ntsKE));
             Assert.That(node.Host.IsServing,               Is.True);
 
             // Asked on the new ports - ClientOf asks where the settings say.
@@ -1229,11 +1229,11 @@ namespace cloud.charging.open.NTSServer.Tests
 
             var section     = SectionInFile(node);
 
-            Assert.That(section["ntsKEPort"]!.Value<Int32>(), Is.EqualTo(ntsKE));
-            Assert.That(section["ntpPort"]!.  Value<Int32>(), Is.EqualTo(ntp));
+            Assert.That(section["ntsKEPort"]!.Value<Int32>(), Is.EqualTo(ntsKE.ToInt32()));
+            Assert.That(section["ntpPort"]!.  Value<Int32>(), Is.EqualTo(ntp.ToInt32()));
 
             // The same again changes nothing.
-            var again       = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpPort", ntp)), "tester");
+            var again       = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpPort", ntp.ToUInt16())), "tester");
 
             Assert.That(again.IsDone,   Is.True);
             Assert.That(again.Changed,  Is.Empty);
@@ -1253,13 +1253,13 @@ namespace cloud.charging.open.NTSServer.Tests
         {
 
             using var taken = new System.Net.Sockets.UdpClient(new IPEndPoint(System.Net.IPAddress.Loopback, 0));
-            var port        = ((IPEndPoint) taken.Client.LocalEndPoint!).Port;
+            var port        = IPPort.Parse(((IPEndPoint) taken.Client.LocalEndPoint!).Port);
 
             var node        = await Started();
             var before      = node.Settings;
             var inFile      = SectionInFile(node).ToString();
 
-            var change      = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpPort", port), new JProperty("local", new JObject(new JProperty("stratum", 2)))), "tester");
+            var change      = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpPort", port.ToUInt16()), new JProperty("local", new JObject(new JProperty("stratum", 2)))), "tester");
 
             Assert.That(change.NotApplied,        Is.Not.Null);
             Assert.That(change.Changed,           Is.Empty);
@@ -1374,24 +1374,24 @@ namespace cloud.charging.open.NTSServer.Tests
         {
 
             var switched    = UDPPorts.Free();
-            var node        = await Started(CommandLine: settings => settings with { NTPPort = IPPort.Parse(switched) });
+            var node        = await Started(CommandLine: settings => settings with { NTPPort = switched });
             var inFile      = SectionInFile(node)["ntpPort"]!.Value<Int32>();
 
-            Assert.That(node.Settings.NTPPort.ToUInt16(), Is.EqualTo(switched));
-            Assert.That(inFile,                           Is.Not.EqualTo(switched));
+            Assert.That(node.Settings.NTPPort, Is.EqualTo(switched));
+            Assert.That(inFile,                           Is.Not.EqualTo(switched.ToInt32()));
 
-            var change      = await node.ChangeSettingsAsync(new JObject(new JProperty("rateLimit", true), new JProperty("ntpPort", switched)), "tester");
+            var change      = await node.ChangeSettingsAsync(new JObject(new JProperty("rateLimit", true), new JProperty("ntpPort", switched.ToUInt16())), "tester");
 
             Assert.That(change.Changed,                          Is.EquivalentTo(new[] { "rateLimit" }));
             Assert.That(SectionInFile(node)["ntpPort"]!.Value<Int32>(), Is.EqualTo(inFile));
             Assert.That(SectionInFile(node)["rateLimit"]!.Value<Boolean>(), Is.True);
 
             var other       = UDPPorts.Free();
-            var changed     = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpPort", other)), "tester");
+            var changed     = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpPort", other.ToUInt16())), "tester");
 
             Assert.That(changed.IsDone,                          Is.True, changed.NotApplied);
-            Assert.That(node.Settings.NTPPort.ToUInt16(),        Is.EqualTo(other));
-            Assert.That(SectionInFile(node)["ntpPort"]!.Value<Int32>(), Is.EqualTo(other));
+            Assert.That(node.Settings.NTPPort,        Is.EqualTo(other));
+            Assert.That(SectionInFile(node)["ntpPort"]!.Value<Int32>(), Is.EqualTo(other.ToInt32()));
             Assert.That(changed.Notes,                           Has.Some.Contains("\"ntpPort\" is set otherwise by a switch"));
 
         }

@@ -19,6 +19,7 @@
 
 using Newtonsoft.Json.Linq;
 
+using org.GraphDefined.Vanaheimr.Illias;
 using org.GraphDefined.Vanaheimr.Hermod;
 using org.GraphDefined.Vanaheimr.Norn.NTS;
 
@@ -92,11 +93,11 @@ namespace cloud.charging.open.NTSServer.Tests
             nodes.Remove(First);
 
             var configuration = JObject.Parse(File.ReadAllText(configFile));
-            configuration[TimeServerSettings.SectionName]!["ntsKEPort"] = TestPorts.Free();
+            configuration[TimeServerSettings.SectionName]!["ntsKEPort"] = TestPorts.Free().ToUInt16();
             File.WriteAllText(configFile, configuration.ToString());
 
             var again = new NTSServerNode(
-                            HTTPPort:          IPPort.Parse(TestPorts.Free()),
+                            HTTPPort:          TestPorts.Free(),
                             AccountsPath:      Path.Combine(directory, "accounts"),
                             ConfigFile:        new WWCPConfigFile(configFile),
                             CertificatesPath:  Path.Combine(directory, "certificates"),
@@ -342,7 +343,7 @@ namespace cloud.charging.open.NTSServer.Tests
             static StringContent JSON(String Text) => new (Text, System.Text.Encoding.UTF8, "application/json");
 
             // An operator, who may read the time server but not change it: nothing made.
-            using var operatorHTTP = await AccountWithPassword(node, "operator1", NTSServerAccess.Operator.Name);
+            using var operatorHTTP = await AccountWithPassword(node, User_Id.Parse("operator1"), NTSServerAccess.Operator.Name);
 
             Assert.That((Int32) (await operatorHTTP.PostAsync(url, JSON("{}"))).StatusCode,                       Is.EqualTo(403));
             Assert.That((Int32) (await operatorHTTP.PostAsync(url + "/retire", JSON("""{ "id": 1 }"""))).StatusCode, Is.EqualTo(403));

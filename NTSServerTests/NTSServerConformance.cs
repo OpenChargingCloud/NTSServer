@@ -22,6 +22,7 @@ using System.Security.Cryptography;
 
 using Newtonsoft.Json.Linq;
 
+using org.GraphDefined.Vanaheimr.Illias;
 using org.GraphDefined.Vanaheimr.Hermod;
 
 using cloud.charging.open.protocols.WWCP.Node;
@@ -62,15 +63,15 @@ namespace cloud.charging.open.NTSServer.Tests
             if (Configuration[TimeServerSettings.SectionName] is not JObject)
                 Configuration[TimeServerSettings.SectionName] = new JObject(
                                                                     new JProperty("listen",     "127.0.0.1"),
-                                                                    new JProperty("ntsKEPort",  TestPorts.Free()),
-                                                                    new JProperty("ntpPort",    UDPPorts.Free())
+                                                                    new JProperty("ntsKEPort",  TestPorts.Free().ToUInt16()),
+                                                                    new JProperty("ntpPort",    UDPPorts.Free().ToUInt16())
                                                                 );
 
             var file = Path.Combine(Directory, WWCPConfigFile.DefaultFileName);
             File.WriteAllText(file, Configuration.ToString());
 
             return new NTSServerNode(
-                       HTTPPort:          IPPort.Parse(TestPorts.Free()),
+                       HTTPPort:          TestPorts.Free(),
                        AccountsPath:      Path.Combine(Directory, "accounts"),
                        ConfigFile:        new WWCPConfigFile(file),
                        CertificatesPath:  Path.Combine(Directory, "certificates"),
@@ -123,7 +124,7 @@ namespace cloud.charging.open.NTSServer.Tests
 
             var password            = "An-Operator-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
 
-            await AccountIn("operator1", NTSServerAccess.Operator.Name, password);
+            await AccountIn(User_Id.Parse("operator1"), NTSServerAccess.Operator.Name, password);
 
             using var http          = await SignedInAs("operator1", password);
 

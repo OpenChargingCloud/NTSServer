@@ -77,13 +77,13 @@ namespace cloud.charging.open.NTSServer
         /// IPv6 address - which is not for security, but what lets a server
         /// below find out that it would be its own upstream server.
         /// </summary>
-        public static ReferenceIdentifier ReferenceIdOf(IIPAddress? Address)
+        public static ReferenceIdentifier ReferenceIdOf(IPAddress? Address)
         {
 
             if (Address is null)
                 return ReferenceIdentifier.From("UPST");
 
-            var bytes = Address.ToDotNet().GetAddressBytes();
+            var bytes = Address.Value.ToDotNet().GetAddressBytes();
 
             if (bytes.Length == 4)
                 return ReferenceIdentifier.From(bytes);

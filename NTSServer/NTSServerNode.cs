@@ -23,6 +23,7 @@ using System.Diagnostics.CodeAnalysis;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
+using org.GraphDefined.Vanaheimr.Illias;
 using org.GraphDefined.Vanaheimr.Hermod;
 using org.GraphDefined.Vanaheimr.Hermod.DNS;
 using org.GraphDefined.Vanaheimr.Hermod.HTTP;
@@ -208,7 +209,7 @@ namespace cloud.charging.open.NTSServer
         /// <param name="SSH">What the program says about the SSH server.</param>
         /// <param name="Web">What the program says of HTTPS and of the reverse proxies in front.</param>
         /// <param name="CommandLine">What the switches of this start say over the "ntsServer" section, or null for nothing.</param>
-        public NTSServerNode(IIPAddress?                                      HTTPHostname       = null,
+        public NTSServerNode(IPAddress?                                      HTTPHostname       = null,
                              IPPort?                                          HTTPPort           = null,
                              HTTPServer?                                      HTTPServer         = null,
                              HTTPPath?                                        BasePath           = null,
@@ -1121,7 +1122,7 @@ namespace cloud.charging.open.NTSServer
         private JArray AccountsJSON()
 
             => new (Host.SSHActivity.
-                        Where  (activity => !SSHClients.Knows(activity.Key)).
+                        Where  (activity => !(User_Id.TryParse(activity.Key) is User_Id client && SSHClients.Knows(client))).
                         OrderBy(activity => activity.Key, StringComparer.OrdinalIgnoreCase).
                         Select (activity => new JObject(
                                                 new JProperty("name",      activity.Key),

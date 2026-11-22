@@ -212,7 +212,7 @@ namespace cloud.charging.open.NTSServer
         /// The address both listeners are bound to: every IPv4 address by
         /// default. "::" or "any" for IPv6 as well.
         /// </summary>
-        public IIPAddress                     Listen       { get; init; } = IPv4Address.Any;
+        public IPAddress                     Listen       { get; init; } = IPv4Address.Any;
 
         /// <summary>
         /// The TCP port of NTS-KE over TLS 1.3.
@@ -751,10 +751,10 @@ namespace cloud.charging.open.NTSServer
         /// families.
         /// </summary>
         public static Boolean TryParseListen(String?                                Text,
-                                             [NotNullWhen(true)] out IIPAddress?    Address)
+                                             out IPAddress                         Address)
         {
 
-            Address = null;
+            Address = default;
 
             var text = Text?.Trim() ?? "";
 
@@ -788,7 +788,7 @@ namespace cloud.charging.open.NTSServer
 
             => Source == TimeSource.Upstream ? "upstream" : "local";
 
-        public static String TextOf(IIPAddress Address)
+        public static String TextOf(IPAddress Address)
 
             => Address is IPvXAddress ? "any" : Address.ToString() ?? "";
 
