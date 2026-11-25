@@ -1,5 +1,7 @@
 # NTSServer
 
+![The EV charging test environment, the NTS server (NTS) highlighted](docs/EVChargingTestEnvironment.svg)
+
 The time server of the OpenChargingCloud: a
 [WWCP_Node](https://github.com/OpenChargingCloud/WWCP_Node) that hands out
 time over NTS - NTS-KE over TLS 1.3 (RFC 8915) and over SSH (the subsystem
