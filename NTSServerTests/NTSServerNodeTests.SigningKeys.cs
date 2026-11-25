@@ -165,8 +165,8 @@ namespace cloud.charging.open.NTSServer.Tests
 
         /// <summary>
         /// A client that learnt the public key before goes on checking the
-        /// responses by it: after the server is made anew - the description
-        /// of the clock changed - and after a restart of the program.
+        /// responses by it: after the server is made anew - its settings
+        /// given again - and after a restart of the program.
         /// </summary>
         [Test]
         public async Task SigningKeys_AreKeptAcrossARestartAndAServerMadeAnew()
@@ -176,10 +176,10 @@ namespace cloud.charging.open.NTSServer.Tests
             var keyExchange = await KeyExchange(node);
             var publicKey   = Convert.ToBase64String(node.Host.SigningKeys.All.Single().PublicKey);
 
-            // Made anew: another stratum.
+            // Made anew: its settings given again.
             var generations = node.Host.Generations;
 
-            await node.Host.StartAsync(node.Host.Description! with { Stratum = 3 });
+            Assert.That(await node.Host.ReconfigureAsync(node.Host.Settings), Is.Null);
 
             Assert.That(node.Host.Generations, Is.GreaterThan(generations), "the server was not made anew");
 

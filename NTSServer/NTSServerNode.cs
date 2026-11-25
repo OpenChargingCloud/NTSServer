@@ -887,6 +887,12 @@ namespace cloud.charging.open.NTSServer
 
                 await Host.StartAsync(ClockDescription.Local(To.Local));
 
+                // The server answers on, described as the clock of this machine
+                // now: its reference timestamp is when it began to hand that out,
+                // as for a server started in local mode, not the last round of
+                // the upstream servers.
+                Host.MarkSynchronized(Clock.GetUtcNow());
+
                 Notes.Add(String.Create(CultureInfo.InvariantCulture,
                               $"The time handed out is this machine's clock from now on: it jumped by {jump.TotalMilliseconds:+0.000;-0.000} ms."));
 

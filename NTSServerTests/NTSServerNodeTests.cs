@@ -318,12 +318,49 @@ namespace cloud.charging.open.NTSServer.Tests
 
         #endregion
 
+        #region LocalMode_TheRunningServerIsDescribedAnew_NotMadeAnew()
+
+        /// <summary>
+        /// Another description of the clock - in upstream mode every round,
+        /// with what it measured - is handed to the server that runs: it
+        /// answers by it at once, and is not made anew for it.
+        /// </summary>
+        [Test]
+        public async Task LocalMode_TheRunningServerIsDescribedAnew_NotMadeAnew()
+        {
+
+            var node        = await Started();
+            var client      = ClientOf(node);
+            var keyExchange = await client.GetNTSKERecords();
+
+            Assert.That(keyExchange.Success, Is.True, keyExchange.ErrorMessage?.ToString());
+
+            var generations = node.Host.Generations;
+            var since       = node.Host.ServingSince;
+
+            await node.Host.StartAsync(node.Host.Description! with { Stratum = 3, LeapIndicator = 1 });
+
+            Assert.That(node.Host.Generations,  Is.EqualTo(generations), "the server was made anew");
+            Assert.That(node.Host.ServingSince, Is.EqualTo(since));
+            Assert.That(node.Host.IsServing,    Is.True);
+
+            var query = await client.QueryTime(NTSKEResponse: keyExchange.Response,
+                                               Timeout:       TimeSpan.FromSeconds(10));
+
+            Assert.That(query.Success,           Is.True, query.ErrorMessage);
+            Assert.That(query.Response!.Stratum, Is.EqualTo(3));
+            Assert.That(query.Response!.LI,      Is.EqualTo(1));
+
+        }
+
+        #endregion
+
         #region LocalMode_ACookieOutlivesTheServerMadeAnew()
 
         /// <summary>
-        /// The server is made anew when the description of the clock changes -
-        /// in upstream mode, when another upstream server is the closest to
-        /// the median. Its clients go on with the cookies they hold.
+        /// The server is made anew where what it was made with changes - its
+        /// address, its ports, its certificate. Its clients go on with the
+        /// cookies they hold.
         /// </summary>
         [Test]
         public async Task LocalMode_ACookieOutlivesTheServerMadeAnew()
@@ -337,7 +374,7 @@ namespace cloud.charging.open.NTSServer.Tests
 
             var generations = node.Host.Generations;
 
-            await node.Host.StartAsync(node.Host.Description! with { Stratum = 3 });
+            Assert.That(await node.Host.ReconfigureAsync(node.Host.Settings), Is.Null);
 
             Assert.That(node.Host.Generations, Is.EqualTo(generations + 1));
             Assert.That(node.Host.IsServing,   Is.True);
@@ -345,8 +382,7 @@ namespace cloud.charging.open.NTSServer.Tests
             var query = await client.QueryTime(NTSKEResponse: keyExchange.Response,
                                                Timeout:       TimeSpan.FromSeconds(10));
 
-            Assert.That(query.Success,           Is.True, query.ErrorMessage);
-            Assert.That(query.Response!.Stratum, Is.EqualTo(3));
+            Assert.That(query.Success, Is.True, query.ErrorMessage);
 
         }
 

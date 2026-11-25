@@ -191,6 +191,7 @@ namespace cloud.charging.open.NTSServer
         private           Task?                                        loop;
         private           Int32                                        outliersInARow;
         private           DateTimeOffset?                              lastDescribed;
+        private           ClockDescription?                            said;
 
         private           Boolean                                      synchronized;
         private           DateTimeOffset?                              synchronizedSince;
@@ -252,9 +253,9 @@ namespace cloud.charging.open.NTSServer
         public event Func<ClockDescription, Task>?  OnSynchronized;
 
         /// <summary>
-        /// The time handed out is still synchronized, but described differently
-        /// enough for a client to have to know: another stratum, another
-        /// server, root delay or dispersion off by a factor of two.
+        /// The time handed out is still synchronized, but described differently:
+        /// with what a round measured - its root delay and dispersion, most of
+        /// the time - or with another stratum, server or leap indicator.
         /// </summary>
         public event Func<ClockDescription, Task>?  OnRedescribed;
 
@@ -523,6 +524,7 @@ namespace cloud.charging.open.NTSServer
                 Announce(trusted);
 
                 Description        = Describe(peer, verdict);
+                said               = Description;
                 lastDescribed      = at;
 
                 log.Notice(String.Create(CultureInfo.InvariantCulture,
@@ -693,9 +695,11 @@ namespace cloud.charging.open.NTSServer
         #region (private) Redescribe(Peer, Verdict, At)
 
         /// <summary>
-        /// Describe the clock anew, and say so where a client would see the
-        /// difference - at most every fifteen minutes, since every new
-        /// description is a Norn server made anew.
+        /// Describe the clock anew, with what this round measured - handed on
+        /// to the server every round it differs, as the server answers by it
+        /// at once - and say so in the log where a client would see the
+        /// difference: at most every fifteen minutes, but another stratum or
+        /// leap indicator at once.
         /// </summary>
         private async Task Redescribe(NTSMeasurementResult  Peer,
                                       TimeSyncVerdict       Verdict,
@@ -707,30 +711,37 @@ namespace cloud.charging.open.NTSServer
             if (Description is null)
             {
                 Description   = description;
+                said          = description;
                 lastDescribed = At;
                 return;
             }
 
-            if (description.IsSameFor(Description))
+            if (description == Description)
+                return;
+
+            Description = description;
+
+            if (OnRedescribed is not null)
+                await OnRedescribed(description);
+
+            if (said is not null && description.IsSameFor(said))
                 return;
 
             // Another stratum at once, since a client chooses by it, and a leap
             // second announced or no longer announced, since a client acts on
             // it; another reference, root delay and dispersion at most every
-            // fifteen minutes - every new description is a server made anew.
-            var mustSay = description.Stratum       != Description.Stratum ||
-                          description.LeapIndicator != Description.LeapIndicator;
+            // fifteen minutes - a log that said each would say little else.
+            var mustSay = said is null                                 ||
+                          description.Stratum       != said.Stratum       ||
+                          description.LeapIndicator != said.LeapIndicator;
 
             if (!mustSay && lastDescribed.HasValue && At - lastDescribed.Value < TimeSpan.FromMinutes(15))
                 return;
 
-            log.Info($"The time handed out is described anew: {description} (was {Description}).", "ntsserver", "upstream", "clock");
+            log.Info($"The time handed out is described anew: {description} (was {said}).", "ntsserver", "upstream", "clock");
 
-            Description   = description;
+            said          = description;
             lastDescribed = At;
-
-            if (OnRedescribed is not null)
-                await OnRedescribed(description);
 
         }
 
@@ -931,6 +942,7 @@ namespace cloud.charging.open.NTSServer
                 return;
 
             Description   = described with { LeapIndicator = 0 };
+            said          = Description;
             lastDescribed = clock.Base.GetUtcNow();
 
             if (OnRedescribed is not null)

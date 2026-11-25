@@ -50,14 +50,14 @@ namespace cloud.charging.open.NTSServer
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A Norn server takes the description of its clock - stratum, reference,
-    /// root delay and dispersion - and its TLS identity when it is made, and
-    /// keeps them. So where either changes, the server is made anew: the old
-    /// one is shut down and a new one bound to the same ports. That is the
-    /// only cost of it: a client that sends a cookie of the old server is told
-    /// so with an NTS NAK and makes a new key exchange, which every NTS client
-    /// does by itself. Which is why it is done only where a client has to see
-    /// the difference - see <see cref="ClockDescription.IsSameFor"/>.
+    /// The description of the clock - stratum, reference, root delay and
+    /// dispersion, leap indicator - is handed to the running server, which
+    /// answers by it from its next response on. A Norn server takes its TLS
+    /// identity, its ports and the rest of its settings only when it is made,
+    /// though: where one of them changes, the server is made anew - the old
+    /// one shut down and a new one bound. Its clients go on with the cookies
+    /// they hold, as every server made reads the master keys the one before it
+    /// wrote.
     /// </para>
     /// <para>
     /// Nothing unsynchronized is ever handed out. Where the time is not
@@ -317,7 +317,7 @@ namespace cloud.charging.open.NTSServer
 
         /// <summary>
         /// Answer, describing the clock as given - or, where a server answers
-        /// already, answer anew with the description given.
+        /// already, describe the clock as given from its next response on.
         /// </summary>
         public async Task StartAsync(ClockDescription Description)
         {
@@ -326,6 +326,21 @@ namespace cloud.charging.open.NTSServer
 
             try
             {
+
+                if (server is NornNTSServer running)
+                {
+
+                    this.Description = Description;
+
+                    running.Redescribe(Stratum:              Description.Stratum,
+                                       ReferenceIdentifier:  Description.ReferenceId,
+                                       RootDelay:            Description.RootDelay,
+                                       RootDispersion:       Description.RootDispersion,
+                                       LeapIndicator:        Description.LeapIndicator);
+
+                    return;
+
+                }
 
                 StopRetrying();
 
@@ -687,9 +702,9 @@ namespace cloud.charging.open.NTSServer
 
                            // Kept in a file, so that the cookies the clients hold
                            // outlive a restart of this program - and the server
-                           // made anew whenever the description of the clock
-                           // changes, which in upstream mode is not rare. Every
-                           // server made reads the keys the one before it wrote.
+                           // made anew for other settings or another certificate.
+                           // Every server made reads the keys the one before it
+                           // wrote.
                            MasterKeysFilePath:            MasterKeysFile,
 
                            // Kept here, as Norn keeps them only while one server

@@ -35,10 +35,10 @@ namespace cloud.charging.open.NTSServer
     /// of RFC 5905 § 7.3 that describe the clock rather than the exchange.
     /// </summary>
     /// <remarks>
-    /// Fixed for as long as one Norn NTS server runs, which takes them when it
-    /// is made: a description that changes is a server made anew. So it is
-    /// made anew only when the description changes in a way a client has to
-    /// know - see <see cref="TimeServerHost"/>.
+    /// Handed to the running Norn NTS server whenever it changes, which
+    /// answers by it from its next response on - see <see cref="TimeServerHost"/>.
+    /// In upstream mode that is every round; what is said of it in the log is
+    /// only a change a client has to know of - see <see cref="IsSameFor"/>.
     /// </remarks>
     /// <param name="Stratum">The stratum: 1 for a primary server, one more than its upstream server otherwise.</param>
     /// <param name="ReferenceId">The reference: four characters at stratum 1, the upstream server's address above it.</param>
@@ -102,8 +102,8 @@ namespace cloud.charging.open.NTSServer
         /// differ by less than a factor of two.
         /// </summary>
         /// <remarks>
-        /// Root delay and dispersion move with every measurement, and a server
-        /// made anew for each would be made anew every minute. A factor of two
+        /// Root delay and dispersion move with every measurement, and a log
+        /// that said each would say something every minute. A factor of two
         /// is what changes a client's root distance enough to matter.
         /// </remarks>
         public Boolean IsSameFor(ClockDescription Other)
