@@ -150,7 +150,7 @@ namespace cloud.charging.open.NTSServer.Tests
             Assert.Multiple(() => {
                 Assert.That(lines[0], Does.StartWith("upstream        synchronized since ").
                                       And.EndWith(", closest to localhost (stratum 1)"));
-                Assert.That(lines,    Has.Some.Matches<String>(line => line.Contains("1 of 1 answered")));
+                Assert.That(lines,    Has.Some.Matches<String>(line => line is not null && line.Contains("1 of 1 answered")));
                 Assert.That(downstream.Upstream.Status().Polls, Is.GreaterThan(polls), "no round was asked");
             });
 
@@ -194,8 +194,8 @@ namespace cloud.charging.open.NTSServer.Tests
 
             Assert.That(listed,    Has.Length.EqualTo(3));
             Assert.That(listed[0], Does.StartWith("2 master key(s)"));
-            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line.EndsWith("seals the cookies made now") && line.Contains($" {second} ")));
-            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line.EndsWith("opens the cookies it sealed") && line.Contains($" {first} ")));
+            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line is not null && line.EndsWith("seals the cookies made now") && line.Contains($" {second} ")));
+            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line is not null && line.EndsWith("opens the cookies it sealed") && line.Contains($" {first} ")));
 
             var forgot  = await AtTheConsole(node, "masterKeys rotate forget");
 

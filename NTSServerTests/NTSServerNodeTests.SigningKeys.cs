@@ -417,9 +417,9 @@ namespace cloud.charging.open.NTSServer.Tests
             listed      = await AtTheConsole(node, "signingKeys");
 
             Assert.That(listed[0], Does.StartWith("3 signing key(s)"));
-            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line.StartsWith("        1  ") && line.Contains("signs where asked for by its id")));
-            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line.StartsWith("        2  ") && line.Contains("not yet - its public key is handed out")));
-            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line.StartsWith("        3  ") && line.Contains("signs now")));
+            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line is not null && line.StartsWith("        1  ") && line.Contains("signs where asked for by its id")));
+            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line is not null && line.StartsWith("        2  ") && line.Contains("not yet - its public key is handed out")));
+            Assert.That(listed,    Has.Exactly(1).Matches<String>(line => line is not null && line.StartsWith("        3  ") && line.Contains("signs now")));
             Assert.That(String.Join("\n", listed), Does.Not.Contain(Convert.ToBase64String(node.Host.SigningKeys.All[0].PrivateKey)), "a private key was shown");
 
             Assert.That(await AtTheConsole(node, "signingKeys retire 1"),
