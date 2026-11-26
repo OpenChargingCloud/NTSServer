@@ -371,17 +371,24 @@ namespace cloud.charging.open.NTSServer
 
             #region A TLS identity of the store that comes or goes
 
-            this.Certificates.OnChanged += () => {
+            this.Certificates.OnChanged += async () => {
 
                 var chosen = ChooseIdentity(out _);
 
-                if (chosen.Fingerprint != Host.Identity.Fingerprint)
+                if (chosen.Fingerprint == Host.Identity.Fingerprint)
+                    return;
+
+                try
                 {
+
+                    await Host.RenewIdentityAsync(chosen);
 
                     this.Log.Notice($"NTS-KE over TLS shows {chosen.Subject} ({chosen.Source}) from now on, SHA-256 {chosen.Fingerprint}.", "ntsserver", "tls");
 
-                    _ = Host.RenewIdentityAsync(chosen);
-
+                }
+                catch (Exception e)
+                {
+                    this.Log.Error($"NTS-KE over TLS goes on showing {Host.Identity.Subject}, SHA-256 {Host.Identity.Fingerprint}: {chosen.Subject} ({chosen.Source}) cannot be shown - {e.Message}", "ntsserver", "tls");
                 }
 
             };
@@ -940,6 +947,11 @@ namespace cloud.charging.open.NTSServer
             upstream.OnRedescribed    += description => Host.StartAsync(description);
             upstream.OnUnsynchronized += why         => Host.StopAsync(why);
             upstream.OnMeasured       += at          => Host.MarkSynchronized(at);
+
+            // What a server asked for signed responses signed - or did not - goes
+            // into the metrological log, as for the node's own check of its time
+            // servers: the evidence of what the time handed out rests on.
+            upstream.OnRound          += verdict     => WriteDownSignedResponses(verdict.Results);
 
             return upstream;
 

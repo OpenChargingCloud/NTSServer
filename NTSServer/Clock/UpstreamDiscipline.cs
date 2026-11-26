@@ -266,6 +266,13 @@ namespace cloud.charging.open.NTSServer
         public event Func<String, Task>?            OnUnsynchronized;
 
         /// <summary>
+        /// The upstream servers were asked: what each of them answered, before
+        /// anything is made of it - the signed responses among it, which are
+        /// the evidence of what they said.
+        /// </summary>
+        public event Action<TimeSyncVerdict>?       OnRound;
+
+        /// <summary>
         /// A round was usable: when, on the clock handed out.
         /// </summary>
         public event Action<DateTimeOffset>?        OnMeasured;
@@ -467,6 +474,8 @@ namespace cloud.charging.open.NTSServer
 
             var verdict  = await group.Sources.Measure(engine, dnsClient, CancellationToken);
             var at       = clock.Base.GetUtcNow();
+
+            OnRound?.Invoke(verdict);
 
             Interlocked.Increment(ref polls);
 
@@ -1039,7 +1048,7 @@ namespace cloud.charging.open.NTSServer
 
             var problems = Verdict.Results.
                                    Where (result => !TimeSyncVerdict.CanBeTrusted(result)).
-                                   Select(result => $"{result.ServerHostname.ToString().TrimEnd('.')}: {result.ErrorMessage?.ToString() ?? result.NTP?.ErrorMessage?.ToString() ?? "no authenticated answer"}").
+                                   Select(result => $"{result.ServerHostname.ToString().TrimEnd('.')}: {result.ErrorMessage?.ToString() ?? result.NTP?.ErrorMessage?.ToString() ?? TimeSyncVerdict.SignatureProblem(result) ?? "no authenticated answer"}").
                                    ToArray();
 
             var why      = problems.Length > 0

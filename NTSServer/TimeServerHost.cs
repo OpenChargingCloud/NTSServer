@@ -51,13 +51,13 @@ namespace cloud.charging.open.NTSServer
     /// <remarks>
     /// <para>
     /// The description of the clock - stratum, reference, root delay and
-    /// dispersion, leap indicator - is handed to the running server, which
-    /// answers by it from its next response on. A Norn server takes its TLS
-    /// identity, its ports and the rest of its settings only when it is made,
-    /// though: where one of them changes, the server is made anew - the old
-    /// one shut down and a new one bound. Its clients go on with the cookies
-    /// they hold, as every server made reads the master keys the one before it
-    /// wrote.
+    /// dispersion, leap indicator - and the TLS identity are handed to the
+    /// running server, which answers by them from its next response and its
+    /// next key exchange on. A Norn server takes its ports and the rest of its
+    /// settings only when it is made, though: where one of them changes, the
+    /// server is made anew - the old one shut down and a new one bound. Its
+    /// clients go on with the cookies they hold, as every server made reads
+    /// the master keys the one before it wrote.
     /// </para>
     /// <para>
     /// Nothing unsynchronized is ever handed out. Where the time is not
@@ -432,9 +432,11 @@ namespace cloud.charging.open.NTSServer
         #region RenewIdentityAsync(Identity)
 
         /// <summary>
-        /// Show another certificate from now on - which takes a server made anew,
-        /// where one runs.
+        /// Show another certificate from now on: the server that runs shows it
+        /// from the next key exchange on, and is not made anew for it - a key
+        /// exchange under way ends under the certificate it began with.
         /// </summary>
+        /// <exception cref="ArgumentException">A key that is not the certificate's: the certificate before is still shown.</exception>
         public async Task RenewIdentityAsync(NTSKETLSIdentity Identity)
         {
 
@@ -446,14 +448,11 @@ namespace cloud.charging.open.NTSServer
                 if (Identity.Fingerprint == this.Identity.Fingerprint)
                     return;
 
+                server?.RenewTLSIdentity(Identity.Certificate,
+                                         Identity.PrivateKey,
+                                         Identity.Subject);
+
                 this.Identity = Identity;
-
-                if (server is null || Description is null)
-                    return;
-
-                StopRetrying();
-                await ShutdownCurrent();
-                await StartOrRetry();
 
             }
             finally
@@ -702,7 +701,7 @@ namespace cloud.charging.open.NTSServer
 
                            // Kept in a file, so that the cookies the clients hold
                            // outlive a restart of this program - and the server
-                           // made anew for other settings or another certificate.
+                           // made anew for other ports, address or settings.
                            // Every server made reads the keys the one before it
                            // wrote.
                            MasterKeysFilePath:            MasterKeysFile,

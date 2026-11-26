@@ -1081,30 +1081,35 @@ namespace cloud.charging.open.NTSServer.Tests
 
         #endregion
 
-        #region (private) StartedFollowing(Upstream, TimeSource = "upstream", Clock = null)
+        #region (private) StartedFollowing(Upstream, TimeSource = "upstream", Clock = null, SignedResponses = false)
 
         /// <summary>
         /// An NTS server in upstream mode following the given one - asked over
         /// NTS-KE (TLS 1.3), its self-signed identity held to as a root of the
         /// node's own store for "nts", as a local network without a PKI would
-        /// hold it - every 16 seconds.
+        /// hold it - every 16 seconds; with SignedResponses, asking it for a
+        /// signed response after every measurement.
         /// </summary>
         private async Task<NTSServerNode> StartedFollowing(NTSServerNode  Upstream,
-                                                           String         TimeSource = "upstream",
-                                                           ServedClock?   Clock = null)
+                                                           String         TimeSource       = "upstream",
+                                                           ServedClock?   Clock            = null,
+                                                           Boolean        SignedResponses  = false)
         {
+
+            var server     = new JObject(
+                                 new JProperty("hostname",   "localhost"),
+                                 new JProperty("ntsKEPort",  Upstream.Settings.NTSKEPort.ToUInt16()),
+                                 new JProperty("ntpPort",    Upstream.Settings.NTPPort.  ToUInt16())
+                             );
+
+            if (SignedResponses)
+                server.Add(new JProperty("signedResponses", true));
 
             var groups     = new JObject(
                                  new JProperty("nts", new JObject(
                                      new JProperty("groups", new JObject(
                                          new JProperty("legal", new JObject(
-                                             new JProperty("servers", new JArray(
-                                                 new JObject(
-                                                     new JProperty("hostname",   "localhost"),
-                                                     new JProperty("ntsKEPort",  Upstream.Settings.NTSKEPort.ToUInt16()),
-                                                     new JProperty("ntpPort",    Upstream.Settings.NTPPort.  ToUInt16())
-                                                 )
-                                             )),
+                                             new JProperty("servers", new JArray(server)),
                                              new JProperty("minServers", 1)
                                          ))
                                      ))
@@ -1177,6 +1182,67 @@ namespace cloud.charging.open.NTSServer.Tests
 
             // The key exchange over SSH has nobody to answer either.
             Assert.That(node.NTSKEOverSSH,    Is.True);
+
+        }
+
+        #endregion
+
+        #region UpstreamMode_FollowsAServerWhoseSignedResponsesCheck()
+
+        /// <summary>
+        /// An upstream server asked for signed responses - "signedResponses"
+        /// in its NTS group, which only an NTS server of Norn answers - is
+        /// followed where its signature checks, and what it signed goes into
+        /// the metrological log: the evidence of what the time handed out rests
+        /// on.
+        /// </summary>
+        [Test]
+        public async Task UpstreamMode_FollowsAServerWhoseSignedResponsesCheck()
+        {
+
+            var upstream   = await Started(new JObject(new JProperty("local", new JObject(new JProperty("stratum", 1), new JProperty("referenceId", "GPS")))));
+            var downstream = await StartedFollowing(upstream, SignedResponses: true);
+            var before     = downstream.Log.LastId;
+            var status     = await downstream.Upstream!.PollAsync();
+            var said       = downstream.Log.Recent(100, before, "signed").ToArray();
+
+            Assert.Multiple(() => {
+                Assert.That(status.Synchronized,                Is.True, $"not synchronized: {status.LastProblem}");
+                Assert.That(status.Answered,                    Is.EqualTo(1));
+                Assert.That(said.Select(entry => entry.Message), Has.Some.Contains("localhost signed its response with its key 1"));
+                Assert.That(said.All(entry => entry.Metrological), Is.True, "a signed response is evidence");
+            });
+
+        }
+
+        #endregion
+
+        #region UpstreamMode_DoesNotFollowAServerThatDoesNotSignWhereItWasAsked()
+
+        /// <summary>
+        /// An upstream server asked for signed responses that signs none - here,
+        /// its only signing key retired - is not followed, however well its
+        /// answer authenticates: it counts neither toward the quorum nor in the
+        /// median, and the log says why. A server known to sign that does not
+        /// is not the server, or one whose keys somebody else has.
+        /// </summary>
+        [Test]
+        public async Task UpstreamMode_DoesNotFollowAServerThatDoesNotSignWhereItWasAsked()
+        {
+
+            var upstream   = await Started(new JObject(new JProperty("local", new JObject(new JProperty("stratum", 1), new JProperty("referenceId", "GPS")))));
+
+            Assert.That(await upstream.Host.RetireSigningKeyAsync(1), Is.Not.Null);
+
+            var downstream = await StartedFollowing(upstream, SignedResponses: true);
+            var status     = await downstream.Upstream!.PollAsync();
+
+            Assert.Multiple(() => {
+                Assert.That(status.Synchronized,        Is.False,  "a server that signed nothing was followed");
+                Assert.That(status.Answered,            Is.EqualTo(0));
+                Assert.That(status.LastProblem,         Does.Contain("asked for a signed response, and got none"));
+                Assert.That(downstream.Host.IsServing,  Is.False);
+            });
 
         }
 
@@ -1436,12 +1502,32 @@ namespace cloud.charging.open.NTSServer.Tests
 
         #region Settings_AnotherHostnameMakesTheSelfSignedCertificateAnew()
 
+        /// <summary>
+        /// Another hostname is another self-signed certificate, shown from the
+        /// next key exchange on by the server that runs - not by one made anew
+        /// for it - while a client goes on with the cookies it holds.
+        /// </summary>
         [Test]
         public async Task Settings_AnotherHostnameMakesTheSelfSignedCertificateAnew()
         {
 
-            var node    = await Started();
-            var before  = node.Host.Identity.Fingerprint;
+            var node         = await Started();
+
+            // The NTP server the key exchange names given as it is: with an NTP
+            // port other than 123, as here, it would be the hostname otherwise -
+            // and another one, which Norn takes only when a server is made.
+            var named        = await node.ChangeSettingsAsync(new JObject(new JProperty("ntpServer", $"localhost:{node.Settings.NTPPort}")), "tester");
+
+            Assert.That(named.IsDone, Is.True, named.NotApplied ?? named.Refused ?? named.NotSaved);
+
+            var before       = node.Host.Identity.Fingerprint;
+            var generations  = node.Host.Generations;
+
+            // The client holds the server to whatever certificate it shows now.
+            var client       = ClientOf(node);
+            var keyExchange  = await client.GetNTSKERecords();
+
+            Assert.That(keyExchange.Success, Is.True, keyExchange.ErrorMessage?.ToString());
 
             var change  = await node.ChangeSettingsAsync(new JObject(new JProperty("hostname", "time.example.lan")), "tester");
 
@@ -1450,8 +1536,19 @@ namespace cloud.charging.open.NTSServer.Tests
             Assert.That(node.Host.Identity.Names,        Does.Contain("time.example.lan"));
             Assert.That(change.Notes,                    Has.Some.Contains(node.Host.Identity.Fingerprint));
             Assert.That(node.Host.IsServing,             Is.True);
+            Assert.That(node.Host.Generations,           Is.EqualTo(generations), "the server was made anew");
 
             Assert.That(node.StatusJSON()["ntsKE"]!["tls"]!["fingerprint"]!.Value<String>(), Is.EqualTo(node.Host.Identity.Fingerprint));
+
+            // Held to the new fingerprint now: the server shows the new certificate.
+            var again        = await ClientOf(node).GetNTSKERecords();
+
+            Assert.That(again.Success, Is.True, again.ErrorMessage?.ToString());
+
+            var query        = await client.QueryTime(NTSKEResponse: keyExchange.Response,
+                                                      Timeout:       TimeSpan.FromSeconds(10));
+
+            Assert.That(query.Success, Is.True, query.ErrorMessage);
 
         }
 
